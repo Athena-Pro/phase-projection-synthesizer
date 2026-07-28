@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Claude Code local settings - machine-specific permission allowlist, contains local paths.
+# The shared launch config (.claude/launch.json) is committed on purpose.
+.claude/settings.local.json
