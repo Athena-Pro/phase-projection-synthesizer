@@ -48,6 +48,22 @@ is parameterized by θ (and `r > 0`, so `arg z ≡ θ`), there is no branch cut 
 genuinely closed; only single-valued maps are offered, for the same reason. A number's first
 52 binary places are all a double has, so that is the ceiling on the Bits control.
 
+A fifth source, **Schwarz–Christoffel**, replaces that Fourier-in-log-r shape space entirely:
+the same eight coefficient pairs become prevertex spacings on the unit circle and
+interior-angle weights β (renormalized so Σβ = n−2). The SC map sends S¹ to a polygon
+boundary whose spectrum carries the SC pole structure at the prevertices — shapes no
+star-shaped Fourier curve can write. Swell softens toward a regular n-gon; Warp/Angle set
+the accessory constant C.
+
+The readout can also be a **morph** between Re and Im: either a linear **chord**
+`(1−α)·Re w + α·Im w`, or a **geodesic** axis rotation
+`Re·cos(απ/2) + Im·sin(απ/2)` — same endpoints, different mid-path (unit-gain at α = ½).
+And the coefficients need not
+come from the number at all: switch to **edit** and eight `d`/`e` pairs become continuous
+values you dial by hand, reaching curves no binary expansion can write. Seeding from the
+number's bits reproduces bit mode exactly, so switching modes is sound-preserving; seeding
+from its decimal digits maps each onto [−1, 1] for something richer straight away.
+
 The blend happens *before* the operator chain, so everything below applies to the arithmetic
 waveform too. See `arithmeticCycle` in `src/lib/audioEngine.ts`.
 
@@ -60,6 +76,21 @@ waveform too. See `arithmeticCycle` in `src/lib/audioEngine.ts`.
   *insert* splices sign-reflected lobes in at the crossings, re-emerging with reversed
   Fourier direction. The warped cycle is re-projected onto exact harmonics, so the transform
   changes timbre, never pitch.
+- **Regime split** — a cut of the cycle conditioned on its own value. Where the waveform
+  leaves a window `[offset − w, offset + w]`, a second cycle is spliced in at a phase offset,
+  across a rail step. Rule B is whichever cycle is already on hand: either single-bend layer
+  (the same A/B decomposition the tensor crossing reads), the arithmetic curve — a bent saw
+  below the line and a number-as-a-curve above it — or the fused cycle itself, displaced,
+  which splices the wave against its own body.
+
+  Everything else in the operator family is a group action: invertible, and either
+  amplitude- or phase-preserving. This one is neither, which is the point — it is the class
+  of transformation the rest cannot express. It runs *before* the projection, so the
+  discontinuity it plants is resolved onto exactly `harmonicsCount` partials of the played
+  note and never folds back as aliasing, and so every operator downstream still applies to
+  the result. *Knee* opens the hard switch into a smoothstep crossfade. Only the difference
+  between the two rails is audible, since the projection discards DC, so it is one bipolar
+  knob rather than two. See `src/lib/regimeSplit.ts`.
 - **Fractional Fourier / linear canonical transform (α)** — the cycle's time–frequency plane
   is rotated by α·90° with a discrete FrFT (Ozaktas chirp-convolution with ×2 oversampling,
   the cycle bandlimited and embedded in a 2× frame so its Wigner support stays on-grid at
@@ -140,13 +171,26 @@ harmonics 2–8.
 - **Spectral motion** — an audio-rate LFO in the worklet morphing the live spectrum toward a
   displaced parameter set inside held notes.
 
+## The voice
+
+- **Filter envelope** — the lowpass lives per voice, so its cutoff is swept per note. The
+  amount is measured in **octaves** around the Cutoff knob rather than in Hz, which is what
+  makes a given setting sweep the same musical distance wherever the base sits, and it is
+  bipolar: the filter can open upward or close downward into the note. Ramps are exponential
+  and clamped to the audible band.
+- **Sub oscillator** — sine, square or triangle, one or two octaves below, one per *note*
+  rather than per unison slot, summed in ahead of the filter so it shares the envelope.
+- **Noise** — white noise through the same filter and amplitude envelope, so a breath or
+  transient is shaped by the sweep instead of sitting on top of it.
+
 ## Voicing and space
 
 - **Unison expander** — a unison stack used to be one spectrum copied and detuned. Each slot
   now carries a weight in [−1, 1] that displaces a few advanced modules *for that voice
   alone*: theta phase (phase-only, so identical brightness with disagreeing waveforms), the
-  cyclotomic orbit position, the Möbius boost, the operator focus, and the LCT angle. Three
-  weight profiles decide how the stack is spread — a ramp tracking detune and pan, alternating
+  cyclotomic orbit position, the Möbius boost, the operator focus, the LCT angle, and the
+  regime window — so a stack crosses into its second rule one voice at a time instead of
+  switching in lockstep. Three weight profiles decide how the stack is spread — a ramp tracking detune and pan, alternating
   pairs, or a golden-ratio scatter uncorrelated with position.
 - **Ambisonic dominance** — the same Lorentz/Möbius group acting on space. Sources encode
   into first-order horizontal B-format, Gerzon's dominance transform (λ = 4^t toward a
@@ -183,10 +227,23 @@ parameter specs' ranges, so no mapping can push a control out of range.
 
 ## Presets and memory
 
-72 factory patches in eight banks — Classic, Number Theory, Transforms, Arithmetic, Ensemble,
-Genesis, Space & Rails, Full Stack — selected from the VFD strip, where ◂ ▸ step *within* the
-current bank. Fifty of them deliberately cross subsystems rather than demonstrating one
-module each.
+114 factory patches in eleven banks — Classic, Number Theory, Transforms, Arithmetic,
+Ensemble, Genesis, Space & Rails, Subtractive, Regimes, Full Stack, 808 — selected from the
+VFD strip, where ◂ ▸ step *within* the current bank. Fifty of them deliberately cross
+subsystems rather than demonstrating one module each, and the Subtractive bank shows the
+voice layer working against the spectral machinery: a filter envelope over a cyclotomic
+anagram is a different instrument from a filter envelope over a sawtooth.
+
+The 22-patch Regimes bank makes the same argument for the split. Five isolate it — the four
+rule-B sources, and the knee opening a hard switch into a morph. The other seventeen run a
+regime-cut cycle through everything downstream of it: the anagram, the Talbot phase, the
+Möbius sphere, the LCT, the arithmetic operators, the downfold, the residue extension, the
+genesis flows, the expander, the rails and the room. A cut spectrum is still a spectrum, so
+all of it applies unchanged — which is the whole reason the split runs before the projection.
+Two are worth singling out: *Cut then Pivoted* stacks both time-domain surgeries in order, so
+the pivot finds zero crossings the split created a stage earlier, and *Four Numbers Above*
+hears the arithmetic curve **only** through rule B, walking π → φ → e → √2 across the
+envelope while the main cycle stays a plain bent saw.
 
 A **User** bank holds 16 memory slots persisted in `localStorage`. *Store* writes the current
 sound into the first free slot and names it after its source; slots can be renamed and
@@ -211,8 +268,14 @@ the control-domain selector. An Output · FX · Master strip stays reachable fro
   `sin(Φ)·AmtB = const` (the pitch offset is `sin(Φ)·AmtB·4` semitones), so either knob
   evolves the timbre while the other compensates and the pitch stays put. The lock saturates
   at the AmtB rails and is degenerate at `sin(Φ) = 0`.
-- **Two assignable LFOs** — sine/triangle/square/sample-and-hold, 0.05–12 Hz, with
-  hardware-style knob-learn: arm ASSIGN, touch any knob, that parameter becomes the target.
+- **Two assignable LFOs** — 0.05–12 Hz, with six shapes: sine, triangle, square,
+  sample-and-hold, a **logistic map** at r = 3.99 (deterministic chaos, clustered rather than
+  uniform, so it lingers near the rails and darts between them), and a **four-step sequence**
+  — which, because the target is whatever knob you touch, is a mini sequencer aimed anywhere
+  in the patch. The four staircase shapes also carry a *lag* that slews each step edge; it is
+  an analytic interpolation from the previous held value rather than a filter, so it always
+  arrives inside the step and cannot overshoot. Hardware-style knob-learn: arm ASSIGN, touch
+  any knob, that parameter becomes the target.
   Modulation is bipolar around the knob's base value and rides on top of it, so presets and
   knob positions are never overwritten. Both LFOs on one target sum.
 - **MIDI layer** — Web MIDI with a default map for the Novation FLKey 37 (eight knobs, mod
@@ -237,12 +300,16 @@ Where things live:
 | `src/lib/audioEngine.ts`      | Coefficient computation, the operator chain, voice graph     |
 | `src/lib/additiveWorklet.ts`  | The realtime harmonic bank - the only hot loop         |
 | `src/lib/frft.ts`             | Discrete fractional Fourier / linear canonical transform     |
+| `src/lib/regimeSplit.ts`      | State-conditional cycle split, applied before projection     |
 | `src/lib/dopplerReverb.ts`    | Moving-wall FDN, plus `shimmerWorklet.ts` for travel mode    |
 | `src/lib/paritySplit.ts`      | Rail split, drive, tone filters and formant banks            |
 | `src/lib/deci.ts`             | Base-10 Turing machine, Gödel registers                      |
 | `src/lib/deciBridge.ts`       | Spectrum → seed → program → parameters or waveform           |
 | `src/lib/presets.ts`          | Factory bank and bank assignment                             |
 | `src/lib/presetsHybrid.ts`    | The 50 cross-subsystem patches                               |
+| `src/lib/presetsVoice.ts`     | Filter-envelope, sub/noise, morph, SC, and coefficient patches |
+| `src/lib/presetsRegime.ts`    | The regime-split bank, isolated and crossed                  |
+| `src/lib/schwarzChristoffel.ts` | Unit-disk SC polygon boundary for the arithmetic source    |
 | `src/lib/userSlots.ts`        | User memory slots and schema-tolerant loading                |
 | `scripts/checkPresets.ts`     | The preset validator                                         |
 

@@ -52,9 +52,14 @@ const ENUMS: Partial<Record<keyof SynthParams, number[]>> = {
   cyclotomicAction: [0, 1],
   cayleyLink: [0, 1],
   expandProfile: [0, 1, 2],
-  arithMap: [0, 1, 2, 3],
-  arithExtract: [0, 1, 2],
+  arithMap: [0, 1, 2, 3, 4],
+  arithExtract: [0, 1, 2, 3],
+  arithCoeffMode: [0, 1],
+  arithMorphMode: [0, 1],
+  subWave: [0, 1, 2],
+  subOctave: [0, 1],
   arithSeqMode: [0, 1],
+  regimeSource: [0, 1, 2, 3],
 };
 
 /**
@@ -129,7 +134,7 @@ const GATES: {
   { key: 'expandAmount', neutral: (v) => v === 0,
     shut: (p) => p.unisonVoices <= 1 ||
                  (p.expandTheta <= 0.001 && p.expandOrbit <= 0.001 && p.expandTilt <= 0.001 &&
-                  p.expandFocus <= 0.001 && p.expandAlpha <= 0.001),
+                  p.expandFocus <= 0.001 && p.expandAlpha <= 0.001 && p.expandRegime <= 0.001),
     why: 'the expander needs more than one voice and at least one spread axis' },
   { key: 'expandOrbit', neutral: (v) => v === 0, shut: (p) => p.cyclotomicMix <= 0.001,
     why: 'orbit spread displaces the cyclotomic power, and that module is dry' },
@@ -140,18 +145,51 @@ const GATES: {
     why: 'α spread displaces the LCT angle, and that stage is neither wet nor swept' },
   { key: 'expandProfile', neutral: (v) => v === 0, shut: (p) => p.expandAmount <= 0.001,
     why: 'the expander is off, so the weight profile is unused' },
-  { key: 'arithBits', neutral: (v) => v === 24, shut: (p) => p.arithMix <= 0.001,
-    why: 'the arithmetic oscillator is not blended in' },
-  { key: 'arithSwell', neutral: (v) => v === 0.7, shut: (p) => p.arithMix <= 0.001,
-    why: 'the arithmetic oscillator is not blended in' },
-  { key: 'arithWarp', neutral: (v) => v === 0, shut: (p) => p.arithMix <= 0.001 || p.arithMap === 0,
+  { key: 'arithBits', neutral: (v) => v === 24, shut: (p) => !arithCurveLive(p),
+    why: 'the arithmetic curve is neither blended in nor read by the regime split' },
+  { key: 'arithSwell', neutral: (v) => v === 0.7, shut: (p) => !arithCurveLive(p),
+    why: 'the arithmetic curve is neither blended in nor read by the regime split' },
+  { key: 'arithWarp', neutral: (v) => v === 0, shut: (p) => !arithCurveLive(p) || p.arithMap === 0,
     why: 'the conformal map is off (or the oscillator is), so Warp has nothing to warp' },
-  { key: 'arithAngle', neutral: (v) => v === 0, shut: (p) => p.arithMix <= 0.001 || p.arithMap === 0,
+  { key: 'arithAngle', neutral: (v) => v === 0, shut: (p) => !arithCurveLive(p) || p.arithMap === 0,
     why: 'the conformal map is off (or the oscillator is)' },
-  { key: 'arithSeqCount', neutral: (v) => v === 1, shut: (p) => p.arithMix <= 0.001,
-    why: 'the arithmetic oscillator is not blended in, so its number walk is inaudible' },
+  { key: 'arithSeqCount', neutral: (v) => v === 1, shut: (p) => !arithCurveLive(p),
+    why: 'the arithmetic curve is unread, so its number walk is inaudible' },
   { key: 'arithSeqMode', neutral: (v) => v === 0, shut: (p) => !arithSequenceActive(p),
     why: 'there is no number walk to clock' },
+  { key: 'arithMorph', neutral: (v) => v === 0.5,
+    shut: (p) => !arithCurveLive(p) || Math.round(p.arithExtract) !== 3,
+    why: 'the morph axis only applies when the readout is set to "morph"' },
+  { key: 'arithMorphMode', neutral: (v) => v === 0,
+    shut: (p) => !arithCurveLive(p) || Math.round(p.arithExtract) !== 3,
+    why: 'the chord/geo path only applies when the readout is set to "morph"' },
+  { key: 'arithCoeffMode', neutral: (v) => v === 0, shut: (p) => !arithCurveLive(p),
+    why: 'the arithmetic curve is neither blended in nor read by the regime split' },
+  // In edit mode the coefficients replace the number entirely, so the bit depth is unread —
+  // and a number walk cannot change a curve that no longer looks at the number.
+  { key: 'arithBits', neutral: (v) => v === 24,
+    shut: (p) => !arithCurveLive(p) || p.arithCoeffMode >= 0.5,
+    why: 'the curve is reading the editable pairs, not the binary expansion' },
+  { key: 'arithSeqCount', neutral: (v) => v === 1,
+    shut: (p) => !arithCurveLive(p) || p.arithCoeffMode >= 0.5,
+    why: 'a number walk is inaudible while the curve reads hand-dialled coefficients' },
+  // The SC path reads a fixed eight coefficient pairs as prevertices and angle weights; it
+  // never touches the bit count or the k^{−s} falloff, both of which belong to the
+  // Fourier-in-log-r shape space that map 4 replaces outright.
+  { key: 'arithBits', neutral: (v) => v === 24, shut: (p) => Math.round(p.arithMap) === 4,
+    why: 'the Schwarz–Christoffel path reads a fixed eight pairs, not the bit expansion' },
+  { key: 'arithDecay', neutral: (v) => v === 1, shut: (p) => !arithCurveLive(p) || Math.round(p.arithMap) === 4,
+    why: 'the curve is unread, or the SC path replaces the k^{−s} falloff it scales' },
+  { key: 'filterEnvAttack', neutral: (v) => v === 0.02, shut: (p) => Math.abs(p.filterEnvAmount) <= 0.001,
+    why: 'the filter envelope has no amount' },
+  { key: 'filterEnvDecay', neutral: (v) => v === 0.35, shut: (p) => Math.abs(p.filterEnvAmount) <= 0.001,
+    why: 'the filter envelope has no amount' },
+  { key: 'filterEnvSustain', neutral: (v) => v === 0.3, shut: (p) => Math.abs(p.filterEnvAmount) <= 0.001,
+    why: 'the filter envelope has no amount' },
+  { key: 'subWave', neutral: (v) => v === 0, shut: (p) => p.subGain <= 0.001,
+    why: 'the sub oscillator is silent' },
+  { key: 'subOctave', neutral: (v) => v === 0, shut: (p) => p.subGain <= 0.001,
+    why: 'the sub oscillator is silent' },
   { key: 'parityBias', neutral: (v) => v === 0, shut: (p) => p.parityMix <= 0.001,
     why: 'the parity split is dry' },
   { key: 'parityFormant', neutral: (v) => v === 0, shut: (p) => p.parityMix <= 0.001,
@@ -176,7 +214,46 @@ const GATES: {
     why: 'the tensor crossing layer is dry' },
   { key: 'crossShear', neutral: (v) => v === 0, shut: (p) => p.crossMix <= 0.001,
     why: 'the tensor crossing layer is dry' },
+  // Regime split. Every shaping knob is gated on Mix, and two are gated further: a threshold
+  // the cycle never reaches means the split never fires, and the down-branch offset is unread
+  // when the window's floor sits below the cycle's own floor.
+  { key: 'regimeThreshold', neutral: (v) => v === 0.5, shut: (p) => p.regimeMix <= 0.001,
+    why: 'the regime split is dry' },
+  { key: 'regimeAsym', neutral: (v) => v === 0, shut: (p) => p.regimeMix <= 0.001,
+    why: 'the regime split is dry' },
+  { key: 'regimeRail', neutral: (v) => v === 0, shut: (p) => p.regimeMix <= 0.001,
+    why: 'the regime split is dry' },
+  { key: 'regimeKnee', neutral: (v) => v === 0, shut: (p) => p.regimeMix <= 0.001,
+    why: 'the regime split is dry' },
+  { key: 'regimeSource', neutral: (v) => v === 0, shut: (p) => p.regimeMix <= 0.001,
+    why: 'the regime split is dry, so its rule-B source is unread' },
+  // The cycle is peak-normalized to ±1, so a window wider than the wave catches nothing at
+  // all: the upper edge is out of reach exactly when asym + threshold ≥ 1, and likewise below.
+  { key: 'regimeMix', neutral: (v) => v === 0,
+    shut: (p) => p.regimeAsym + p.regimeThreshold >= 1 && p.regimeAsym - p.regimeThreshold <= -1,
+    why: 'the window is wider than the cycle, so no sample is ever outside it' },
+  { key: 'regimeOffsetUp', neutral: (v) => v === 0,
+    shut: (p) => p.regimeMix <= 0.001 || p.regimeAsym + p.regimeThreshold >= 1,
+    why: 'the upper branch never fires — its edge is above the cycle peak' },
+  { key: 'regimeOffsetDn', neutral: (v) => v === 0.5,
+    shut: (p) => p.regimeMix <= 0.001 || p.regimeAsym - p.regimeThreshold <= -1,
+    why: 'the lower branch never fires — its edge is below the cycle trough' },
+  { key: 'expandRegime', neutral: (v) => v === 0, shut: (p) => p.regimeMix <= 0.001,
+    why: 'regime spread displaces the split window, and that module is dry' },
 ];
+
+/**
+ * Whether the arithmetic curve is actually built.
+ *
+ * It used to have exactly one consumer, so `arithMix > 0` was the whole gate. The regime
+ * split is now a second: with rule-B source "number" the curve is computed and spliced into
+ * the cycle whether or not it is blended into the main oscillator. Every arith-shaping gate
+ * below reads this instead of `arithMix` so those knobs are not reported dead when it is the
+ * split, not the blend, that is reading them.
+ */
+function arithCurveLive(p: SynthParams): boolean {
+  return p.arithMix > 0.001 || (p.regimeMix > 0.001 && Math.round(p.regimeSource) === 2);
+}
 
 const REF_HZ = midiToFreq(48);
 
