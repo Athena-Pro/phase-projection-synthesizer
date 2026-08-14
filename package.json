@@ -12,11 +12,16 @@
     "check:presets": "esbuild scripts/checkPresets.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/checkPresets.cjs --log-level=warning && node node_modules/.cache/checkPresets.cjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/motion": "^8.0.1",
     "lucide-react": "^0.546.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.4.2",
     "@tailwindcss/vite": "^4.1.14",
     "@types/node": "^22.14.0",
     "@types/react": "^19.0.0",

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { midiToFreq } from '../lib/audioEngine';
 import { Knob, HardwareButton, HardwareSection, SegmentGroup } from './ui';
+import { haptics } from '../lib/haptics';
 
 interface VirtualKeyboardProps {
   onNoteOn: (note: number, frequency: number) => void;
@@ -98,6 +99,7 @@ export default function VirtualKeyboard({
     }
     const shifted = getShiftedNote(midiNote);
     activeScreenNotesRef.current.set(midiNote, shifted);
+    haptics.impactLight();
     onNoteOn(shifted, midiToFreq(shifted));
   };
 
@@ -390,7 +392,7 @@ export default function VirtualKeyboard({
                       }}
                       onTouchEnd={() => handleKeyOff(k.midiNote)}
                       onTouchCancel={() => handleKeyOff(k.midiNote)}
-                      className={`flex-1 min-w-[26px] h-20 border border-black/60 rounded-b-[3px] flex flex-col justify-end items-center pb-1 transition-colors cursor-pointer ${
+                      className={`flex-1 min-w-[32px] h-32 border border-black/60 rounded-b-[3px] flex flex-col justify-end items-center pb-1 transition-colors cursor-pointer ${
                         isNoteActive
                           ? 'bg-phos text-black'
                           : 'bg-[#e8e6dd] hover:bg-[#d6d4ca] text-black/50'
@@ -431,7 +433,7 @@ export default function VirtualKeyboard({
                         onTouchEnd={() => handleKeyOff(blackNoteMidi)}
                         onTouchCancel={() => handleKeyOff(blackNoteMidi)}
                         title={`${NOTE_NAMES[blackNoteMidi % 12]} (${keyLabel || ''})`}
-                        className={`absolute left-1/2 -translate-x-1/2 w-[16px] h-12 rounded-b-[2px] z-10 cursor-pointer pointer-events-auto border border-black transition-colors ${
+                        className={`absolute left-1/2 -translate-x-1/2 w-[22px] h-20 rounded-b-[2px] z-10 cursor-pointer pointer-events-auto border border-black transition-colors ${
                           isNoteActive ? 'bg-phos' : 'bg-[#17181b] hover:bg-[#26282c]'
                         }`}
                       />

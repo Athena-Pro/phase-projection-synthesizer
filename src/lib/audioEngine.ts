@@ -1,9 +1,13 @@
 import { SynthParams } from '../types';
+import { ARITH_COEFF_PAIRS } from './paramSpecs';
 import { getWorkletUrl } from './additiveWorklet';
 import { lctCycle } from './frft';
 import { DopplerReverb, DopplerParams } from './dopplerReverb';
 import { getShimmerWorkletUrl } from './shimmerWorklet';
+import { getTickerWorkletUrl } from './tickerWorklet';
 import { ParitySplit, ParityParams } from './paritySplit';
+import { schwarzChristoffelBoundary } from './schwarzChristoffel';
+import { applyRegimeSplit } from './regimeSplit';
 
 export function midiToFreq(note: number): number {
   return 440 * Math.pow(2, (note - 69) / 12);
@@ -104,12 +108,16 @@ export function evaluateModulatedBentSaw(
 // A second oscillator, sitting beside the bent saw: it reads a *number* as a closed curve
 // and hands one lap of that curve to the resynthesis chain as a cycle of audio.
 //
-//   1. Binary expansion. The integer part's bits become cosine coefficients, the fraction's
-//      bits become sine coefficients:  log r(θ) = Σ_k k^{−s} (d_k cos kθ + e_k sin kθ).
-//      Building the *log* radius keeps r positive for any bit pattern, so every number is a
-//      star-shaped curve around the origin rather than something self-intersecting.
-//   2. Conformal map of that curve, w = f(z) with z = r(θ)e^{iθ}.
-//   3. Extraction of a real signal from w — the cycle the DFT then sees.
+// Two shape spaces share the same coefficient pairs and the same extract/morph stage:
+//
+//   A. Fourier-in-log-r (maps 0–3). Binary / edit coefficients build
+//        log r(θ) = Σ_k k^{−s} (d_k cos kθ + e_k sin kθ),
+//      the star-shaped curve z = r e^{iθ} is pushed through a conformal map (none / exp /
+//      Joukowsky / Möbius), and one component of w is the cycle.
+//   B. Schwarz–Christoffel (map 4). The same pairs are read as a polygon: d_k → prevertex
+//      spacing on S¹, e_k → interior-angle weights β_k with Σ β = n−2. The SC map of the
+//      unit disk sends the circle to the polygon boundary — a different spectrum (poles at
+//      the prevertices) that no Fourier-in-log-r curve can reach.
 //
 // The curve is parameterized by θ, and since r > 0 we have arg z ≡ θ exactly. That matters:
 // computing arg z with a principal-branch atan2 (the obvious way) puts a 2π jump on the
@@ -131,13 +139,45 @@ export function arithSequence(p: SynthParams): number[] {
   return [p.arithValue, p.arithValue2, p.arithValue3, p.arithValue4].slice(0, count);
 }
 
-/** True when a note traverses more than one number. */
+/**
+ * True when a note traverses more than one number.
+ *
+ * The curve has two consumers, so a walk is audible through either: the blend into the main
+ * cycle (`arithMix`), and the regime split reading the curve as its rule-B source. Gating on
+ * `arithMix` alone would silently freeze the walk for a patch that hears the number only
+ * through the split.
+ */
 export function arithSequenceActive(p: SynthParams): boolean {
-  return p.arithMix > 0.001 && arithSequence(p).length > 1;
+  const heard = p.arithMix > 0.001 || (p.regimeMix > 0.001 && Math.round(p.regimeSource) === 2);
+  return heard && arithSequence(p).length > 1;
 }
 
-/** Conformal maps available to the arithmetic source (0..3, a SegmentGroup). */
-export const ARITH_MAPS = ['none', 'exp', 'joukowsky', 'mobius'] as const;
+/** Conformal / source maps available to the arithmetic oscillator (0..4, a SegmentGroup). */
+export const ARITH_MAPS = ['none', 'exp', 'joukowsky', 'mobius', 'sc'] as const;
+
+/** Raw (d, e) pairs from edit sliders or the number's leading bits — shared by Fourier and SC. */
+function arithRawCoeffs(p: SynthParams, count: number): { d: Float64Array; e: Float64Array } {
+  const d = new Float64Array(count);
+  const e = new Float64Array(count);
+  if (p.arithCoeffMode >= 0.5) {
+    const rec = p as unknown as Record<string, number>;
+    for (let k = 0; k < count; k++) {
+      d[k] = rec[`arithD${k + 1}`] ?? 0;
+      e[k] = rec[`arithE${k + 1}`] ?? 0;
+    }
+  } else {
+    let intPart = Math.floor(Math.abs(p.arithValue));
+    let frac = Math.abs(p.arithValue) - intPart;
+    for (let k = 0; k < count; k++) {
+      d[k] = intPart % 2;
+      intPart = Math.floor(intPart / 2);
+      frac *= 2;
+      e[k] = frac >= 1 ? 1 : 0;
+      frac -= e[k];
+    }
+  }
+  return { d, e };
+}
 
 /**
  * One cycle of the arithmetic boundary, mean-removed and peak-normalized to ±1 (the DFT
@@ -149,29 +189,88 @@ export const ARITH_MAPS = ['none', 'exp', 'joukowsky', 'mobius'] as const;
  * pole at 1/ā is outside the curve for any |a| < 1. `swell` then reads as the depth of the
  * radial wobble rather than as a gain that can run away — the original 1/k series is the
  * harmonic series, so with many 1-bits its log radius grows like ln(bits).
+ * On the SC path, `swell` softens the polygon toward regular; `warp`/`angle` set accessory C.
  */
 export function arithmeticCycle(p: SynthParams, K: number): Float64Array {
-  const bits = Math.max(1, Math.min(ARITH_MAX_BITS, Math.round(p.arithBits)));
+  const map = Math.round(p.arithMap);
+  const extract = Math.round(p.arithExtract);
+  const morph = Math.max(0, Math.min(1, p.arithMorph));
+  // Chord: (1−α)Re + α·Im. Geodesic: unit-circle rotation of the readout axis — same
+  // Re/Im endpoints, mid-α differs by √2 gain and equal-energy path.
+  const morphGeo = p.arithMorphMode >= 0.5;
+  const morphC = morphGeo ? Math.cos(morph * Math.PI * 0.5) : 1 - morph;
+  const morphS = morphGeo ? Math.sin(morph * Math.PI * 0.5) : morph;
+
+  const finish = (wr: Float64Array, wi: Float64Array): Float64Array => {
+    const out = new Float64Array(K);
+    for (let j = 0; j < K; j++) {
+      out[j] =
+        extract === 1
+          ? wi[j]
+          : extract === 2
+            ? Math.hypot(wr[j], wi[j])
+            : extract === 3
+              ? morphC * wr[j] + morphS * wi[j]
+              : wr[j];
+    }
+    let mean = 0;
+    for (let j = 0; j < K; j++) mean += out[j];
+    mean /= K;
+    let peak = 0;
+    for (let j = 0; j < K; j++) {
+      out[j] -= mean;
+      const a = Math.abs(out[j]);
+      if (a > peak) peak = a;
+    }
+    if (peak > 1e-9) {
+      const g = 1 / peak;
+      for (let j = 0; j < K; j++) out[j] *= g;
+    }
+    return out;
+  };
+
+  // Schwarz–Christoffel polygon: d/e → prevertices + β, boundary is the cycle.
+  if (map === 4) {
+    const { d, e } = arithRawCoeffs(p, ARITH_COEFF_PAIRS);
+    const soften = Math.max(0, Math.min(1, p.arithSwell / 1.5));
+    const cAbs = 0.2 + 0.8 * Math.max(0, Math.min(1, p.arithWarp));
+    const { re, im } = schwarzChristoffelBoundary(d, e, K, soften, cAbs, p.arithAngle);
+    return finish(re, im);
+  }
+
+  // Coefficients come either from the number's binary expansion or from the editable pairs.
+  // Both feed the same k^{−s} weighting, so switching modes changes only where d and e come
+  // from — bits give 0/1 at up to 52 terms, hand-dialled pairs give continuous values at 8.
+  const editing = p.arithCoeffMode >= 0.5;
+  const bits = editing
+    ? ARITH_COEFF_PAIRS
+    : Math.max(1, Math.min(ARITH_MAX_BITS, Math.round(p.arithBits)));
   const value = Math.abs(p.arithValue);
   let intPart = Math.floor(value);
   let frac = value - intPart;
 
   // Integer part low bit first (cosines), fraction high bit first (sines). Division rather
   // than >> because a double's integer part can exceed 32 bits.
-  const amp = new Float64Array(bits);
   const cosAmp = new Float64Array(bits);
   const sinAmp = new Float64Array(bits);
   let used = 0;
   for (let k = 0; k < bits; k++) {
-    amp[k] = Math.pow(k + 1, -p.arithDecay);
-    const d = intPart % 2;
-    intPart = Math.floor(intPart / 2);
-    frac *= 2;
-    const e = frac >= 1 ? 1 : 0;
-    frac -= e;
-    cosAmp[k] = d * amp[k];
-    sinAmp[k] = e * amp[k];
-    if (d || e) used++;
+    const amp = Math.pow(k + 1, -p.arithDecay);
+    let d: number;
+    let e: number;
+    if (editing) {
+      d = (p as unknown as Record<string, number>)[`arithD${k + 1}`] ?? 0;
+      e = (p as unknown as Record<string, number>)[`arithE${k + 1}`] ?? 0;
+    } else {
+      d = intPart % 2;
+      intPart = Math.floor(intPart / 2);
+      frac *= 2;
+      e = frac >= 1 ? 1 : 0;
+      frac -= e;
+    }
+    cosAmp[k] = d * amp;
+    sinAmp[k] = e * amp;
+    if (d !== 0 || e !== 0) used++;
   }
 
   const logR = new Float64Array(K);
@@ -198,12 +297,11 @@ export function arithmeticCycle(p: SynthParams, K: number): Float64Array {
     for (let j = 0; j < K; j++) logR[j] = logR[j] * scale - p.arithSwell;
   }
 
-  const map = Math.round(p.arithMap);
-  const extract = Math.round(p.arithExtract);
   const warp = p.arithWarp;
   const ca = Math.cos(p.arithAngle);
   const sa = Math.sin(p.arithAngle);
-  const out = new Float64Array(K);
+  const wrArr = new Float64Array(K);
+  const wiArr = new Float64Array(K);
 
   for (let j = 0; j < K; j++) {
     const theta = (j / K) * 2 * Math.PI;
@@ -248,23 +346,11 @@ export function arithmeticCycle(p: SynthParams, K: number): Float64Array {
       }
     }
 
-    out[j] = extract === 1 ? wi : extract === 2 ? Math.hypot(wr, wi) : wr;
+    wrArr[j] = wr;
+    wiArr[j] = wi;
   }
 
-  let mean = 0;
-  for (let j = 0; j < K; j++) mean += out[j];
-  mean /= K;
-  let peak = 0;
-  for (let j = 0; j < K; j++) {
-    out[j] -= mean;
-    const a = Math.abs(out[j]);
-    if (a > peak) peak = a;
-  }
-  if (peak > 1e-9) {
-    const g = 1 / peak;
-    for (let j = 0; j < K; j++) out[j] *= g;
-  }
-  return out;
+  return finish(wrArr, wiArr);
 }
 
 export function getCollatzStoppingTime(n: number): number {
@@ -799,12 +885,45 @@ export function computeFourierSeries(
   // layer keeps meaning what it means (the product of the two bend spectra). Everything
   // downstream — pivot, LCT, comb, χ, Hecke, theta, cyclotomic, circulant, Möbius, and the
   // unison expander — then operates on the arithmetic waveform for free.
-  if (p.arithMix > 0.001) {
-    const arith = arithmeticCycle(p, K);
+  // The arithmetic curve is also one of the regime split's rule-B sources, so it is built
+  // once here and shared rather than recomputed inside the split.
+  const regimeOn = p.regimeMix > 0.001;
+  const regimeSource = Math.round(p.regimeSource);
+  const needsArith = p.arithMix > 0.001 || (regimeOn && regimeSource === 2);
+  const arith = needsArith ? arithmeticCycle(p, K) : null;
+
+  if (arith && p.arithMix > 0.001) {
     const mix = Math.min(1, p.arithMix);
     for (let j = 0; j < K; j++) {
       samples[j] = (1 - mix) * samples[j] + mix * arith[j];
     }
+  }
+
+  // State-conditional regime split. It reads the cycle *after* the arithmetic blend, so the
+  // window is measured against whatever the oscillator section actually produced, and it runs
+  // before the projection so its discontinuities land on the harmonic grid rather than
+  // aliasing. Rule B comes from one of the cycles already on hand: either single-bend layer
+  // (the same A/B decomposition the tensor crossing reads), the arithmetic curve, or the
+  // fused cycle itself — which makes the split self-referential, the closest analogue of a
+  // time-domain regime oscillator swapping between two phases of one rule.
+  if (regimeOn) {
+    const ruleB =
+      regimeSource === 1
+        ? samplesB
+        : regimeSource === 2 && arith
+          ? arith
+          : regimeSource === 3
+            ? samples
+            : samplesA;
+    samples = applyRegimeSplit(samples, ruleB, {
+      threshold: p.regimeThreshold,
+      asym: p.regimeAsym,
+      rail: p.regimeRail,
+      offsetUp: p.regimeOffsetUp,
+      offsetDn: p.regimeOffsetDn,
+      knee: p.regimeKnee,
+      mix: p.regimeMix,
+    });
   }
 
   // Time-domain zero-crossing pivot, applied before projection onto harmonics
@@ -1666,7 +1785,8 @@ export function expanderActive(p: SynthParams): boolean {
       p.expandOrbit > 0.001 ||
       p.expandTilt > 0.001 ||
       p.expandFocus > 0.001 ||
-      p.expandAlpha > 0.001)
+      p.expandAlpha > 0.001 ||
+      p.expandRegime > 0.001)
   );
 }
 
@@ -1688,6 +1808,9 @@ export function expanderActive(p: SynthParams): boolean {
  *     across bands (needs operatorWidth below its all-pass rail).
  *   • α Angle   — the LCT/FrFT rotation of the cycle's time-frequency plane (needs
  *     frftMix > 0).
+ *   • Offset    — the regime window's position, so each voice breaks into the second rule
+ *     at a different point of the wave: the stack becomes a graded ensemble crossing over
+ *     one voice at a time instead of switching in lockstep (needs regimeMix > 0).
  * The periodic axes (σ mod 2, α mod 4) take a plain signed offset and wrap. The bounded
  * ones spread across a window that slides inside their rails, so they stay usable — and
  * stay injective in w — even with the patch value parked at a rail.
@@ -1723,6 +1846,9 @@ export function divergeParams(p: SynthParams, weight: number): SynthParams {
   if (p.expandAlpha > 0.001) {
     out.frftAngle = wrapRange(p.frftAngle + weight * amount * p.expandAlpha * 0.4, 4);
   }
+  if (p.expandRegime > 0.001) {
+    out.regimeAsym = spreadRange(p.regimeAsym, weight, amount * p.expandRegime * 0.5, -1, 1);
+  }
   // Return the patch itself when this weight landed on it — the sliding window means
   // weight 0 is not automatically the identity, so identity is detected, not assumed.
   // Callers use `=== p` to route the voice to the shared frames.
@@ -1731,7 +1857,8 @@ export function divergeParams(p: SynthParams, weight: number): SynthParams {
     out.cyclotomicPower !== p.cyclotomicPower ||
     out.mobiusBoost !== p.mobiusBoost ||
     out.operatorFocus !== p.operatorFocus ||
-    out.frftAngle !== p.frftAngle;
+    out.frftAngle !== p.frftAngle ||
+    out.regimeAsym !== p.regimeAsym;
   return moved ? out : p;
 }
 
@@ -1794,6 +1921,12 @@ interface AudioVoice {
   azimuths: number[];
   /** Expander divergence weight per slot, fixed at note-on alongside detune and pan. */
   weights: number[];
+  /** Per-voice lowpass carrying the filter envelope. */
+  filter: BiquadFilterNode;
+  sub?: OscillatorNode;
+  subGain?: GainNode;
+  noise?: AudioBufferSourceNode;
+  noiseGain?: GainNode;
   voiceGain: GainNode;
   triggerTime: number;
   releaseTime?: number;
@@ -1820,6 +1953,11 @@ export const WAVE_KEYS: (keyof SynthParams)[] = [
   'arithValue2',
   'arithValue3',
   'arithValue4',
+  'arithMorph',
+  'arithMorphMode',
+  'arithCoeffMode',
+  'arithD1', 'arithD2', 'arithD3', 'arithD4', 'arithD5', 'arithD6', 'arithD7', 'arithD8',
+  'arithE1', 'arithE2', 'arithE3', 'arithE4', 'arithE5', 'arithE6', 'arithE7', 'arithE8',
   'crossMix',
   'crossPhase',
   'crossShear',
@@ -1854,6 +1992,14 @@ export const WAVE_KEYS: (keyof SynthParams)[] = [
   'spectralFold',
   'foldPeriod',
   'interfere',
+  'regimeMix',
+  'regimeThreshold',
+  'regimeAsym',
+  'regimeRail',
+  'regimeOffsetUp',
+  'regimeOffsetDn',
+  'regimeKnee',
+  'regimeSource',
   'zeroStretch',
   'zeroInsert',
   'frftAngle',
@@ -1897,6 +2043,7 @@ const FRAME_KEYS: (keyof SynthParams)[] = [
   'expandTilt',
   'expandFocus',
   'expandAlpha',
+  'expandRegime',
 ];
 
 // Envelope times: they shape the amp envelope on the audio graph (applied per note-on), and
@@ -1968,7 +2115,11 @@ function parityParams(p: SynthParams, pitchRatio = 1): ParityParams {
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
-  private filterNode: BiquadFilterNode | null = null;
+  // The lowpass now lives per voice (so it can be swept by its own envelope); this is just
+  // the dry junction the voices sum into, and the tap the post-filter FX send reads.
+  private dryBus: GainNode | null = null;
+  /** One cycle of white noise, shared by every voice that wants a noise layer. */
+  private noiseBuffer: AudioBuffer | null = null;
   private preFxBus: GainNode | null = null;
   private postFxBus: GainNode | null = null;
   public analyser: AnalyserNode | null = null;
@@ -2012,24 +2163,25 @@ export class AudioEngine {
     this.ctx = new AudioContextClass();
     await this.ctx.audioWorklet.addModule(getWorkletUrl());
     await this.ctx.audioWorklet.addModule(getShimmerWorkletUrl());
+    // Registered here so attachments that need an audio-thread clock (the buffer
+    // transformer) can construct their node synchronously once the engine is ready.
+    await this.ctx.audioWorklet.addModule(getTickerWorkletUrl());
 
     this.masterGain = this.ctx.createGain();
-    this.filterNode = this.ctx.createBiquadFilter();
+    this.dryBus = this.ctx.createGain();
     this.preFxBus = this.ctx.createGain();
     this.postFxBus = this.ctx.createGain();
     this.analyser = this.ctx.createAnalyser();
 
-    this.filterNode.type = 'lowpass';
-    this.filterNode.frequency.value = this.currentParams.cutoff;
-    this.filterNode.Q.value = this.currentParams.resonance;
+    this.noiseBuffer = this.makeNoiseBuffer();
     this.masterGain.gain.value = this.currentParams.volume;
 
     // Voices feed the dry filter and a pre-filter FX tap. The route control crossfades
     // the pre/post taps so dark patches can excite formants/reverb before the master LPF.
     this.reverb = new DopplerReverb(this.ctx);
     this.parity = new ParitySplit(this.ctx);
-    this.filterNode.connect(this.masterGain); // dry path
-    this.filterNode.connect(this.postFxBus);
+    this.dryBus.connect(this.masterGain); // dry path
+    this.dryBus.connect(this.postFxBus);
     this.preFxBus.connect(this.reverb.input);
     this.postFxBus.connect(this.reverb.input);
     this.reverb.wet.connect(this.masterGain); // wet return
@@ -2055,9 +2207,16 @@ export class AudioEngine {
 
     if (!this.ctx) return;
 
-    if (this.filterNode) {
-      this.filterNode.frequency.setValueAtTime(params.cutoff, this.ctx.currentTime);
-      this.filterNode.Q.setValueAtTime(params.resonance, this.ctx.currentTime);
+    if (old.cutoff !== params.cutoff || old.resonance !== params.resonance) {
+      const t = this.ctx.currentTime;
+      this.activeVoices.forEach((voice) => {
+        voice.filter.Q.setTargetAtTime(params.resonance, t, 0.02);
+        // While a filter envelope owns the cutoff, its scheduled ramps must not be fought;
+        // the new base takes effect on the next note, as detune and unison already do.
+        if (Math.abs(params.filterEnvAmount) <= 0.001) {
+          voice.filter.frequency.setTargetAtTime(params.cutoff, t, 0.02);
+        }
+      });
     }
     if (this.masterGain) {
       this.masterGain.gain.setValueAtTime(params.volume, this.ctx.currentTime);
@@ -2423,6 +2582,55 @@ export class AudioEngine {
     });
   }
 
+  /** Two seconds of white noise, looped — one buffer shared by every voice. */
+  private makeNoiseBuffer(): AudioBuffer | null {
+    if (!this.ctx) return null;
+    const frames = Math.floor(this.ctx.sampleRate * 2);
+    const buffer = this.ctx.createBuffer(1, frames, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+    return buffer;
+  }
+
+  /**
+   * Schedule a voice filter's cutoff for the life of a note.
+   *
+   * The envelope is measured in **octaves** around the Cutoff knob rather than in Hz, so a
+   * given Amount sweeps the same musical distance wherever the base sits — a ±Hz amount, as
+   * more conventional designs use, is a huge sweep down low and inaudible up high. Amount is
+   * bipolar, so the filter can open upward or close downward, and everything is clamped into
+   * the audible band. With Amount at zero the cutoff is simply set and left alone.
+   */
+  private scheduleFilterEnvelope(filter: BiquadFilterNode, t: number) {
+    const p = this.currentParams;
+    const base = Math.max(20, Math.min(20000, p.cutoff));
+    if (Math.abs(p.filterEnvAmount) <= 0.001) {
+      filter.frequency.setValueAtTime(base, t);
+      return;
+    }
+    const clamp = (hz: number) => Math.max(20, Math.min(20000, hz));
+    const peak = clamp(base * Math.pow(2, p.filterEnvAmount));
+    const sustain = clamp(base * Math.pow(2, p.filterEnvAmount * p.filterEnvSustain));
+    const attack = Math.max(0.001, p.filterEnvAttack);
+    const decay = Math.max(0.001, p.filterEnvDecay);
+    filter.frequency.cancelScheduledValues(t);
+    filter.frequency.setValueAtTime(base, t);
+    // Exponential ramps read as musically linear in pitch, and cannot reach or cross zero,
+    // which is exactly right for a frequency.
+    filter.frequency.exponentialRampToValueAtTime(peak, t + attack);
+    filter.frequency.exponentialRampToValueAtTime(sustain, t + attack + decay);
+  }
+
+  /** Release leg of the filter envelope: fall back to the base cutoff over the amp release. */
+  private releaseFilterEnvelope(filter: BiquadFilterNode, t: number) {
+    const p = this.currentParams;
+    if (Math.abs(p.filterEnvAmount) <= 0.001) return;
+    const base = Math.max(20, Math.min(20000, p.cutoff));
+    filter.frequency.cancelScheduledValues(t);
+    filter.frequency.setValueAtTime(Math.max(20, filter.frequency.value), t);
+    filter.frequency.exponentialRampToValueAtTime(base, t + Math.max(0.005, p.release));
+  }
+
   /** Tear a voice's audio graph down and let its worklet processors die. */
   private teardown(voice: AudioVoice) {
     if (voice.dead) return;
@@ -2437,7 +2645,19 @@ export class AudioEngine {
     voice.spatialL.forEach((g) => g.disconnect());
     voice.spatialR.forEach((g) => g.disconnect());
     voice.mergers.forEach((m) => m.disconnect());
+    for (const src of [voice.sub, voice.noise]) {
+      if (!src) continue;
+      try {
+        src.stop();
+      } catch (_) {}
+      try {
+        src.disconnect();
+      } catch (_) {}
+    }
     try {
+      voice.subGain?.disconnect();
+      voice.noiseGain?.disconnect();
+      voice.filter.disconnect();
       voice.voiceGain.disconnect();
     } catch (_) {}
   }
@@ -2462,16 +2682,71 @@ export class AudioEngine {
     }
 
     const t = this.ctx.currentTime;
+    const p = this.currentParams;
     const voiceGain = this.ctx.createGain();
     voiceGain.gain.setValueAtTime(0, t);
-    voiceGain.connect(this.filterNode!);
+
+    // Per-voice lowpass, so the cutoff can be swept by its own envelope. The pre-filter FX
+    // send still taps ahead of it, which is what "pre" routing has always meant.
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.Q.setValueAtTime(p.resonance, t);
+    this.scheduleFilterEnvelope(filter, t);
+    voiceGain.connect(filter);
+    filter.connect(this.dryBus!);
     voiceGain.connect(this.preFxBus!);
 
-    const a = this.currentParams.attack;
-    const d = this.currentParams.decay;
-    const s = this.currentParams.sustain;
-    voiceGain.gain.linearRampToValueAtTime(1.0, t + a);
+    const a = p.attack;
+    const d = p.decay;
+    const s = p.sustain;
+    if (p.attackCurve) {
+      voiceGain.gain.setValueAtTime(0.0001, t);
+      voiceGain.gain.exponentialRampToValueAtTime(1.0, Math.max(t + 0.001, t + a));
+    } else {
+      voiceGain.gain.linearRampToValueAtTime(1.0, t + a);
+    }
     voiceGain.gain.exponentialRampToValueAtTime(Math.max(s, 0.0001), t + a + d);
+
+    // Sub oscillator and noise: one of each per note rather than per unison slot, summed
+    // into the same voice gain so they share the amplitude envelope and the filter.
+    let sub: OscillatorNode | undefined;
+    let subGainNode: GainNode | undefined;
+    let noise: AudioBufferSourceNode | undefined;
+    let noiseGainNode: GainNode | undefined;
+    const playedFreqForSub = frequency * this.pitchMultiplier();
+    if (p.subGain > 0.001) {
+      sub = this.ctx.createOscillator();
+      sub.type = p.subWave >= 1.5 ? 'triangle' : p.subWave >= 0.5 ? 'square' : 'sine';
+      sub.frequency.setValueAtTime(playedFreqForSub / (p.subOctave >= 0.5 ? 4 : 2), t);
+      subGainNode = this.ctx.createGain();
+      subGainNode.gain.value = p.subGain;
+      sub.connect(subGainNode);
+      subGainNode.connect(voiceGain);
+      sub.start(t);
+    }
+    if (p.noiseGain > 0.001 && this.noiseBuffer) {
+      noise = this.ctx.createBufferSource();
+      noise.buffer = this.noiseBuffer;
+      noise.loop = true;
+      noiseGainNode = this.ctx.createGain();
+      noiseGainNode.gain.value = p.noiseGain;
+      noise.connect(noiseGainNode);
+      noiseGainNode.connect(voiceGain);
+      noise.start(t);
+    }
+    if (p.transientNoise && p.transientNoise > 0.001 && this.noiseBuffer) {
+      const tNoise = this.ctx.createBufferSource();
+      tNoise.buffer = this.noiseBuffer;
+      tNoise.loop = true;
+      const tNoiseGain = this.ctx.createGain();
+      tNoiseGain.gain.setValueAtTime(0, t);
+      tNoiseGain.gain.linearRampToValueAtTime(p.transientNoise, t + 0.002);
+      tNoiseGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+      tNoise.connect(tNoiseGain);
+      tNoiseGain.connect(voiceGain);
+      tNoise.start(t);
+      tNoise.stop(t + 0.1);
+    }
 
     const nodes: AudioWorkletNode[] = [];
     const gains: GainNode[] = [];
@@ -2496,6 +2771,10 @@ export class AudioEngine {
       const oscGain = this.ctx.createGain();
 
       node.parameters.get('frequency')?.setValueAtTime(playedFreq, t);
+      if (p.transientPunch && p.transientPunch > 0.001) {
+        node.parameters.get('frequency')?.setValueAtTime(playedFreq * (1 + 8 * p.transientPunch), t);
+        node.parameters.get('frequency')?.exponentialRampToValueAtTime(playedFreq, t + 0.05);
+      }
 
       let detune = 0;
       let pan = 0;
@@ -2544,6 +2823,11 @@ export class AudioEngine {
       mergers,
       azimuths,
       weights,
+      filter,
+      sub,
+      subGain: subGainNode,
+      noise,
+      noiseGain: noiseGainNode,
       voiceGain,
       triggerTime: t,
     });
@@ -2563,6 +2847,8 @@ export class AudioEngine {
     const t = this.ctx.currentTime;
     voice.releaseTime = t;
     this.updateTrackedFxPitch();
+
+    this.releaseFilterEnvelope(voice.filter, t);
 
     // Tell the worklets the key came up, so an envelope-paced sequence can enter its
     // release segment and walk to the final number.
@@ -2591,6 +2877,78 @@ export class AudioEngine {
     }, (r + 0.1) * 1000);
   }
 
+  public triggerKick() {
+    if (!this.ctx || this.ctx.state === 'suspended') return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(0.001, t + 0.5);
+    gain.gain.setValueAtTime(1.0, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.5);
+  }
+
+  public triggerShaker() {
+    if (!this.ctx || this.ctx.state === 'suspended' || !this.noiseBuffer) return;
+    const t = this.ctx.currentTime;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    noise.loop = true;
+    
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 5000;
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.8, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+
+    noise.start(t);
+    noise.stop(t + 0.2);
+  }
+
+  public triggerCrash() {
+    if (!this.ctx || this.ctx.state === 'suspended' || !this.noiseBuffer) return;
+    const t = this.ctx.currentTime;
+    
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.8, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 2.0);
+    gain.connect(this.masterGain);
+
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    noise.loop = true;
+    const noiseFilter = this.ctx.createBiquadFilter();
+    noiseFilter.type = 'highpass';
+    noiseFilter.frequency.value = 6000;
+    noise.connect(noiseFilter);
+    noiseFilter.connect(gain);
+    noise.start(t);
+    noise.stop(t + 2.1);
+
+    for (let i = 0; i < 4; i++) {
+       const osc = this.ctx.createOscillator();
+       osc.type = 'square';
+       osc.frequency.value = 300 * Math.pow(1.5, i) + (Math.random() * 50);
+       const oscGain = this.ctx.createGain();
+       oscGain.gain.value = 0.15;
+       osc.connect(oscGain);
+       oscGain.connect(gain);
+       osc.start(t);
+       osc.stop(t + 2.1);
+    }
+  }
+
   public panic() {
     if (!this.ctx) return;
     this.activeVoices.forEach((voice) => this.teardown(voice));
@@ -2603,6 +2961,27 @@ export class AudioEngine {
 
   public getActiveNotes(): number[] {
     return Array.from(this.activeVoices.keys());
+  }
+
+  /**
+   * Attachment points for modules that listen to the synth and add to it — currently the
+   * buffer transformer.
+   *
+   * `analysisTap` is the master bus *before* the monitor analyser, and `monitorBus` is the
+   * analyser itself. A module that reads the tap and writes to the monitor bus is therefore
+   * heard and visualized, but its own output never reaches the node it is analysing, so
+   * there is no feedback path to run away.
+   */
+  public get context(): AudioContext | null {
+    return this.ctx;
+  }
+
+  public get analysisTap(): AudioNode | null {
+    return this.masterGain;
+  }
+
+  public get monitorBus(): AudioNode | null {
+    return this.analyser;
   }
 
   public getAnalyserData(): Uint8Array {

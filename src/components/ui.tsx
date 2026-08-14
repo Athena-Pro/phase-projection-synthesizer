@@ -1,4 +1,5 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
+import { haptics } from '../lib/haptics';
 
 /** Panel section with silkscreen border and an engraved title notch. */
 export function HardwareSection({
@@ -58,6 +59,7 @@ export function Knob({
   focused?: boolean;
 }) {
   const drag = useRef<{ startY: number; startValue: number } | null>(null);
+  const [isActive, setIsActive] = useState(false);
 
   const quantize = (v: number) => {
     const q = Math.round((v - min) / step) * step + min;
@@ -69,6 +71,7 @@ export function Knob({
     if (q !== value) {
       onChange(q);
       onTouch?.(label, format(q));
+      haptics.impactLight();
     }
   };
 
@@ -79,6 +82,7 @@ export function Knob({
       // Synthetic events have no active pointer to capture; drag still works
     }
     drag.current = { startY: e.clientY, startValue: value };
+    setIsActive(true);
     onTouch?.(label, format(value));
   };
 
@@ -92,6 +96,7 @@ export function Knob({
 
   const handlePointerUp = () => {
     drag.current = null;
+    setIsActive(false);
   };
 
   const handleDoubleClick = () => {
@@ -147,7 +152,7 @@ export function Knob({
       onKeyDown={handleKeyDown}
       className={`flex flex-col items-center gap-0.5 select-none rounded-md transition-shadow focus:outline-none focus:ring-1 focus:ring-phos/70 ${
         focused ? 'ring-1 ring-phos/70 shadow-[0_0_8px_rgba(88,255,141,0.4)]' : ''
-      }`}
+      } ${isActive ? 'scale-105 shadow-[0_0_12px_rgba(88,255,141,0.6)] z-10' : ''}`}
       title={format(value)}
     >
       <svg
@@ -218,9 +223,14 @@ export function HardwareButton({
   onClick: () => void;
   title?: string;
 }) {
+  const handleClick = () => {
+    haptics.impactMedium();
+    onClick();
+  };
+
   return (
     <button
-      onClick={onClick}
+      onClick={handleClick}
       title={title}
       className="flex flex-col items-center gap-1 cursor-pointer group select-none"
     >
@@ -260,7 +270,10 @@ export function SegmentGroup<T extends string | number>({
           key={String(o.id)}
           type="button"
           title={o.hint}
-          onClick={() => onChange(o.id)}
+          onClick={() => {
+            haptics.impactMedium();
+            onChange(o.id);
+          }}
           className="flex flex-col items-center gap-0.5 cursor-pointer select-none"
         >
           <span

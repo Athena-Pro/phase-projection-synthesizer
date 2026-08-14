@@ -31,6 +31,10 @@ body {
   color: var(--color-label);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
 }
 
 /* VFD / phosphor display text glow */

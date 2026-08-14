@@ -1,5 +1,5 @@
 import React from 'react';
-import { LfoConfig, LfoShape } from '../lib/lfo';
+import { LfoConfig, LfoShape, StepSeq, DEFAULT_STEPS } from '../lib/lfo';
 import { PARAM_SPECS } from '../lib/paramSpecs';
 import { Knob, HardwareSection, SegmentGroup } from './ui';
 
@@ -15,8 +15,13 @@ const SHAPES: { id: LfoShape; label: string; hint: string }[] = [
   { id: 'sine', label: '∿', hint: 'Sine' },
   { id: 'tri', label: '⋀', hint: 'Triangle' },
   { id: 'sqr', label: '⊓', hint: 'Square' },
-  { id: 's&h', label: '⁘', hint: 'Sample & hold' },
+  { id: 's&h', label: '⁘', hint: 'Sample & hold — a new uniformly random value each cycle' },
+  { id: 'chaos', label: '⋔', hint: 'Logistic map at r = 3.99 — deterministic chaos, clustered rather than uniform, so it lingers near the rails and darts between them' },
+  { id: 'step4', label: '⊞', hint: 'Four-step sequence — a mini sequencer aimed at whichever knob this LFO is assigned to' },
 ];
+
+/** Shapes that hold a value between edges, so Lag has something to slew across. */
+const STEPPED: LfoShape[] = ['sqr', 's&h', 'chaos', 'step4'];
 
 export default function LfoPanel({ lfos, onChange, armed, onArm, onTouch }: LfoPanelProps) {
   return (
@@ -87,6 +92,21 @@ export default function LfoPanel({ lfos, onChange, armed, onArm, onTouch }: LfoP
                 onTouch={(l, d) => onTouch(`LFO${i + 1} ${l}`, d)}
               />
 
+              {/* Lag only means something on a staircase, so it appears with one. */}
+              {STEPPED.includes(lfo.shape) && (
+                <Knob
+                  label="Lag"
+                  value={lfo.lag ?? 0}
+                  min={0}
+                  max={0.95}
+                  step={0.01}
+                  defaultValue={0}
+                  format={(v) => (v <= 0 ? 'step' : `${Math.round(v * 100)}%`)}
+                  onChange={(v) => onChange(i, { ...lfo, lag: v })}
+                  onTouch={(l, d) => onTouch(`LFO${i + 1} ${l}`, d)}
+                />
+              )}
+
               <div className="pt-1">
                 <SegmentGroup<LfoShape>
                   value={lfo.shape}
@@ -95,6 +115,33 @@ export default function LfoPanel({ lfos, onChange, armed, onArm, onTouch }: LfoP
                 />
               </div>
             </div>
+
+            {lfo.shape === 'step4' && (
+              <div className="flex flex-wrap gap-x-2 gap-y-1 pt-1.5">
+                {[0, 1, 2, 3].map((s) => {
+                  const steps = lfo.steps ?? DEFAULT_STEPS;
+                  return (
+                    <Knob
+                      key={s}
+                      label={`Step ${s + 1}`}
+                      value={steps[s]}
+                      min={-1}
+                      max={1}
+                      step={0.01}
+                      defaultValue={DEFAULT_STEPS[s]}
+                      format={(v) => v.toFixed(2)}
+                      onChange={(v) => {
+                        const next = [...steps] as StepSeq;
+                        next[s] = v;
+                        onChange(i, { ...lfo, steps: next });
+                      }}
+                      onTouch={(l, d) => onTouch(`LFO${i + 1} ${l}`, d)}
+                      size={34}
+                    />
+                  );
+                })}
+              </div>
+            )}
           </HardwareSection>
         );
       })}

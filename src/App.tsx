@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { startMotionDetection, stopMotionDetection, MotionConfig, DEFAULT_MOTION_CONFIG, applyMotion } from './lib/motionEngine';
+import { Looper } from './lib/looper';
+import { LooperPanel } from './components/LooperPanel';
 import { SynthParams } from './types';
 import { AudioEngine, midiToFreq } from './lib/audioEngine';
 import { SYNTH_PRESETS, FACTORY_BANKS } from './lib/presets';
@@ -20,6 +23,12 @@ import SynthControls from './components/SynthControls';
 import LfoPanel from './components/LfoPanel';
 import MidiPanel from './components/MidiPanel';
 import DeciPanel, { DeciScope } from './components/DeciPanel';
+import BufferPanel from './components/BufferPanel';
+import {
+  BufferTransformer,
+  BufferParams,
+  DEFAULT_BUFFER_PARAMS,
+} from './lib/bufferTransformer';
 import { generatePatch, generateNumberPatch, DEFAULT_DECI_MAP, FULL_DECI_MAP } from './lib/deciBridge';
 import { HardwareButton } from './components/ui';
 import PatchStrip, { PatchEntry } from './components/PatchStrip';
@@ -98,7 +107,18 @@ export default function App() {
   const [mainTab, setMainTab] = useState<MainTab>('editor');
   const [vfd, setVfd] = useState<{ label: string; value: string } | null>(null);
 
+  const looperRef = useRef<Looper | null>(null);
+  const [looperState, setLooperState] = useState({ isRecording: false, isPlaying: false, events: 0, duration: 0 });
+  const [motionEnabled, setMotionEnabled] = useState(false);
+  const [motionConfig, setMotionConfig] = useState<MotionConfig>(DEFAULT_MOTION_CONFIG);
+  const [motionPitch, setMotionPitch] = useState(0);
+  const [motionRoll, setMotionRoll] = useState(0);
+
   const [isEngineActive, setIsEngineActive] = useState(false);
+  // Buffer transformer: a resynthesizer that reads the analysis ring diagonally. Like the
+  // deci patcher it is a modular attachment with its own state, not part of a patch.
+  const [bufferParams, setBufferParams] = useState<BufferParams>(DEFAULT_BUFFER_PARAMS);
+  const bufferRef = useRef<BufferTransformer | null>(null);
   const [activeNotes, setActiveNotes] = useState<number[]>([]);
   const [lastPlayedNote, setLastPlayedNote] = useState(48);
   const [fxBypass, setFxBypass] = useState(false);
@@ -119,13 +139,34 @@ export default function App() {
     return () => clearInterval(id);
   }, [anyLfoActive]);
 
-  const modded = useMemo(
-    () => (anyLfoActive ? applyLfos(params, lfos, performance.now()) : params),
-    [params, lfos, lfoTick, anyLfoActive]
-  );
+  const modded = useMemo(() => {
+    let m = params;
+    if (anyLfoActive) m = applyLfos(m, lfos, performance.now());
+    if (motionConfig.targetPitch || motionConfig.targetRoll) m = applyMotion(m, motionConfig, motionPitch, motionRoll);
+    return m;
+  }, [params, lfos, lfoTick, anyLfoActive, motionConfig, motionPitch, motionRoll]);
   const auditioned = useMemo(() => (fxBypass ? bypassEffects(modded) : modded), [modded, fxBypass]);
 
   const audioEngine = useMemo(() => new AudioEngine(SYNTH_PRESETS[0].params), []);
+
+  // The transformer needs live audio nodes, so it is built the first time the engine is
+  // running and the module is switched on, and torn down with the page.
+  useEffect(() => {
+    if (!isEngineActive || !bufferParams.enabled) {
+      bufferRef.current?.setParams({ ...bufferParams, enabled: false });
+      return;
+    }
+    if (!bufferRef.current) {
+      const ctx = audioEngine.context;
+      const tap = audioEngine.analysisTap;
+      const monitor = audioEngine.monitorBus;
+      if (!ctx || !tap || !monitor) return;
+      bufferRef.current = new BufferTransformer(ctx, tap, monitor);
+    }
+    bufferRef.current.setParams(bufferParams);
+  }, [audioEngine, bufferParams, isEngineActive]);
+
+  useEffect(() => () => bufferRef.current?.dispose(), []);
 
   // FLKey 37 control layer
   const midiRouter = useMemo(() => new MidiRouter(FLKEY37_DEFAULT_MAP()), []);
@@ -190,6 +231,39 @@ export default function App() {
   }, [auditioned, audioEngine]);
 
   useEffect(() => {
+    if (!looperRef.current) {
+      looperRef.current = new Looper(audioEngine);
+      looperRef.current.onStateChange = setLooperState;
+    }
+  }, [audioEngine]);
+
+  useEffect(() => {
+    if (motionEnabled) {
+      startMotionDetection(
+        () => {
+          audioEngine.triggerKick();
+          looperRef.current?.recordEvent('kick');
+        },
+        () => {
+          audioEngine.triggerShaker();
+          looperRef.current?.recordEvent('shaker');
+        },
+        () => {
+          audioEngine.triggerCrash();
+          looperRef.current?.recordEvent('crash');
+        },
+        (pitch, roll) => {
+          setMotionPitch(pitch);
+          setMotionRoll(roll);
+        }
+      );
+    } else {
+      stopMotionDetection();
+    }
+    return () => stopMotionDetection();
+  }, [motionEnabled, audioEngine]);
+
+  useEffect(() => {
     audioEngine.registerVoiceStateCallback(() => {
       setActiveNotes(audioEngine.getActiveNotes());
     });
@@ -205,6 +279,7 @@ export default function App() {
   const handleNoteOn = useCallback(
     (note: number, frequency: number) => {
       setLastPlayedNote(note);
+      looperRef.current?.recordEvent('noteOn', note);
       audioEngine
         .start()
         .then(() => {
@@ -218,6 +293,7 @@ export default function App() {
 
   const handleNoteOff = useCallback(
     (note: number) => {
+      looperRef.current?.recordEvent('noteOff', note);
       audioEngine.noteOff(note);
     },
     [audioEngine]
@@ -527,13 +603,13 @@ export default function App() {
   const bankPosition = bankIndices(bank).indexOf(patchIndex) + 1;
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 overflow-auto">
-      <div className="flex rounded-lg shadow-[0_18px_50px_rgba(0,0,0,0.7)] w-[1100px] shrink-0">
+    <div className="min-h-screen flex md:items-center justify-center md:p-4 overflow-auto bg-black md:bg-transparent">
+      <div className="flex w-full md:w-[1100px] md:rounded-lg shadow-[0_18px_50px_rgba(0,0,0,0.7)] shrink-0">
         {/* Wood cheeks */}
-        <div className="wood w-6 rounded-l-lg shrink-0" />
+        <div className="wood w-6 rounded-l-lg shrink-0 hidden md:block" />
 
-        {/* Faceplate — fixed VST frame (locked at 1100 × 760) */}
-        <div className="bg-face flex-1 min-w-0 border-y border-black px-5 py-3 flex flex-col gap-2 h-[760px]">
+        {/* Faceplate */}
+        <div className="bg-face flex-1 min-w-0 md:border-y border-black px-2 md:px-5 py-3 flex flex-col gap-2 min-h-screen md:min-h-0 md:h-[760px]">
           {/* Brand row */}
           <div className="flex items-end justify-between pb-1.5 border-b border-silk/20">
             <div className="flex items-baseline gap-3">
@@ -685,11 +761,66 @@ export default function App() {
                 {/* Modulation deck */}
                 <LfoPanel
                   lfos={lfos}
-                  onChange={handleLfoChange}
                   armed={armed}
+                  onChange={handleLfoChange}
                   onArm={handleLfoArm}
                   onTouch={handleLfoTouch}
                 />
+
+                <div className="flex flex-col gap-2 p-3 bg-black/40 border border-silk/20 rounded-sm">
+                  <div className="text-[10px] uppercase tracking-widest text-silk/60 flex justify-between items-center">
+                    <span>Motion & Percussion</span>
+                  </div>
+                  <button
+                    className={`py-2 text-xs font-bold rounded-sm transition-colors ${
+                      motionEnabled
+                        ? 'bg-amber-500/80 text-white shadow-[0_0_15px_rgba(245,158,11,0.5)]'
+                        : 'bg-silk/10 text-silk hover:bg-silk/20'
+                    }`}
+                    onClick={() => {
+                      if (!isEngineActive && !motionEnabled) {
+                        audioEngine.start().then(() => setIsEngineActive(true));
+                      }
+                      setMotionEnabled((v) => !v);
+                    }}
+                  >
+                    {motionEnabled ? 'MOTION ACTIVE' : 'ENABLE MOTION'}
+                  </button>
+                  <div className="text-[9px] text-silk/50">
+                    Strike for Kick, Shake for Shaker, Whip for Crash
+                  </div>
+                  
+                  <div className="flex gap-2 text-xs mt-1">
+                    <div className="flex-1">
+                      <label className="text-[9px] text-silk/50 block uppercase mb-1">Tilt Y Map (Pitch)</label>
+                      <select 
+                        className="w-full p-1 bg-black/50 border border-silk/20 text-silk rounded-sm outline-none"
+                        value={motionConfig.targetPitch || ''}
+                        onChange={e => setMotionConfig(c => ({ ...c, targetPitch: (e.target.value || null) as any }))}
+                      >
+                        <option value="">Off</option>
+                        {Object.entries(PARAM_SPECS).map(([k, v]) => (
+                          <option key={k} value={k}>{v.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex-1">
+                      <label className="text-[9px] text-silk/50 block uppercase mb-1">Tilt X Map (Roll)</label>
+                      <select 
+                        className="w-full p-1 bg-black/50 border border-silk/20 text-silk rounded-sm outline-none"
+                        value={motionConfig.targetRoll || ''}
+                        onChange={e => setMotionConfig(c => ({ ...c, targetRoll: (e.target.value || null) as any }))}
+                      >
+                        <option value="">Off</option>
+                        {Object.entries(PARAM_SPECS).map(([k, v]) => (
+                          <option key={k} value={k}>{v.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <LooperPanel looper={looperRef.current} looperState={looperState} />
 
                 {/* FLKey 37 control layer */}
                 <MidiPanel
@@ -711,6 +842,12 @@ export default function App() {
               </div>
 
               {/* Deci-core arithmetic patcher */}
+              <BufferPanel
+                params={bufferParams}
+                onChange={setBufferParams}
+                active={isEngineActive}
+              />
+
               <DeciPanel
                 enabled={deciEnabled}
                 program={deciProgram}
@@ -758,7 +895,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="wood-r w-6 rounded-r-lg shrink-0" />
+        <div className="wood-r w-6 rounded-r-lg shrink-0 hidden md:block" />
       </div>
     </div>
   );

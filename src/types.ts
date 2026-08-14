@@ -2,7 +2,9 @@
 // Knob. The discrete enums — `valuationBase`, `alphaEnvMode`, `extendBloom`,
 // `dopplerMode`, `mobiusFlow`, `thetaFlow`, `cyclotomicAction`, `cyclotomicFlow`,
 // `cayleyLink`, `dirichletModulus`, `heckePrime`, `expandProfile`, `arithMap`,
-// `arithExtract`, `arithSeqMode`, and `bandMode` — are intentionally absent from
+// `arithExtract`, `arithSeqMode`, `arithCoeffMode`, `arithMorphMode`, `subWave`, `subOctave`,
+// `regimeSource`, and `bandMode`
+// — are intentionally absent from
 // PARAM_SPECS: they're selected via SegmentGroup toggles rather than a knob, which is why
 // they lack a keyof spec. `arithValue` is absent for the same reason from the other end —
 // it (and `arithValue2`..`arithValue4`) is an arbitrary number typed into a field, not a
@@ -22,7 +24,7 @@ export interface SynthParams {
   arithBits: number;    // 1 to 52: how many binary places drive the curve (harmonic 1..bits of the log radius)
   arithDecay: number;   // 0.25 to 2: exponent s in the k^{−s} coefficient falloff (1 = the harmonic series; higher = smoother curve)
   arithSwell: number;   // 0.0 to 1.5: depth of the radial wobble in log units — r spans [e^{−2·swell}, 1]
-  arithMap: number;     // conformal map: 0 = none, 1 = exp, 2 = Joukowsky, 3 = Möbius disk automorphism
+  arithMap: number;     // 0 = none, 1 = exp, 2 = Joukowsky, 3 = Möbius disk, 4 = Schwarz–Christoffel polygon
   arithWarp: number;    // 0.0 to 1.0: the map's parameter (exp rate / Joukowsky c / Möbius |a|)
   arithAngle: number;   // 0 to 2π: the map parameter's argument — which direction the map pulls
   arithExtract: number; // which real signal to read off the mapped curve: 0 = real, 1 = imaginary, 2 = radius
@@ -34,6 +36,29 @@ export interface SynthParams {
   arithValue3: number;
   arithValue4: number;
   arithSeqMode: number;  // 0 = envelope (stages follow attack → decay → sustain hold → release), 1 = timed (the α Time ramp)
+  arithMorph: number;    // 0.0 to 1.0: readout axis when arithExtract is "morph" — blends Re↔Im (see arithMorphMode)
+  arithMorphMode: number; // 0 = chord (1−α)·Re + α·Im, 1 = geodesic Re·cos(απ/2) + Im·sin(απ/2) — same endpoints, different mid-path
+  // The curve's coefficients can come from the number's bits (the default) or be dialled by
+  // hand. Eight pairs is where the k^{−s} falloff makes further terms marginal; bit mode
+  // still reads up to 52. `Seed` in the UI writes the number's bits or digits into these.
+  arithCoeffMode: number; // 0 = read the number's binary expansion, 1 = use the editable pairs below
+  arithD1: number; arithD2: number; arithD3: number; arithD4: number;
+  arithD5: number; arithD6: number; arithD7: number; arithD8: number;
+  arithE1: number; arithE2: number; arithE3: number; arithE4: number;
+  arithE5: number; arithE6: number; arithE7: number; arithE8: number;
+  // ── Filter envelope ────────────────────────────────────────────────────────────────
+  // The lowpass moved from the master bus into the voice so it can be swept per note.
+  // Amount is in octaves around the Cutoff knob, and is bipolar so the sweep can fall.
+  filterEnvAmount: number;  // -4 to 4 octaves added to the cutoff at the envelope's peak
+  filterEnvAttack: number;  // 0.005 to 2 s
+  filterEnvDecay: number;   // 0.005 to 2 s
+  filterEnvSustain: number; // 0.0 to 1.0: fraction of the peak held while the key is down
+  // ── Sub oscillator and noise ───────────────────────────────────────────────────────
+  // One of each per *note*, not per unison slot, summed in before the voice filter.
+  subGain: number;    // 0.0 to 1.0
+  subWave: number;    // 0 = sine, 1 = square, 2 = triangle
+  subOctave: number;  // 0 = one octave down, 1 = two octaves down
+  noiseGain: number;  // 0.0 to 0.5: white noise through the same filter and envelope
   crossMix: number;     // 0.0 to 1.0: mixes the diagonalized Fourier cross-product
   crossPhase: number;   // 0.0 to 2*PI: phase shift of the cross layer
   crossShear: number;   // -8 to 8 (integer): selects the sheared diagonal r = s + k of the tensor product
@@ -70,6 +95,19 @@ export interface SynthParams {
   spectralFold: number;     // 0.0 to 1.0: dry/wet of quotient downfold — wrap n > period into the low harmonic grid
   foldPeriod: number;       // 2 to 16: period K of the spectral quotient map n ↦ 1 + ((n−1) mod K)
   interfere: number;        // 0.0 to 1.0: dry/wet of pitch-locked 2nd-order sum/difference products (nonlinear timbre interference)
+  // ── Regime split ───────────────────────────────────────────────────────────────────
+  // A state-conditional cut of the cycle: where the waveform's own value leaves a window,
+  // a second cycle is spliced in at a phase offset, across a rail step. Applied before the
+  // projection, so the discontinuities it plants land on the harmonic grid instead of
+  // aliasing. See applyRegimeSplit in regimeSplit.ts.
+  regimeMix: number;       // 0.0 to 1.0: dry/wet of the split (0 = the module is off)
+  regimeThreshold: number; // 0.05 to 1.0: half-width of the region-A window in cycle amplitude
+  regimeAsym: number;      // -1 to 1: signed offset of the window, walking the caught region up/down the wave
+  regimeRail: number;      // -1 to 1: step between rail A and rail B at the crossover (only the difference is audible — DC is discarded at projection)
+  regimeOffsetUp: number;  // 0.0 to 1.0: phase offset (in cycles) of the branch taken above the window
+  regimeOffsetDn: number;  // 0.0 to 1.0: phase offset (in cycles) of the branch taken below the window
+  regimeKnee: number;      // 0.0 to 1.0: crossover width — 0 is a hard switch, opening it smoothsteps the rules together
+  regimeSource: number;    // which cycle supplies the out-of-window rule: 0 = bend A, 1 = bend B, 2 = arithmetic curve, 3 = the fused cycle itself
   zeroStretch: number;  // 0.0 to 1.0: time dilation pivoting at zero crossings
   zeroInsert: number;   // 0.0 to 1.0: reflected lobes inserted at zero crossings
   frftAngle: number;    // 0 to 4 (units of π/2): fractional Fourier rotation of the cycle's time-frequency plane
@@ -116,9 +154,12 @@ export interface SynthParams {
   parityKeyTrack: number; // 0.0 to 1.0: scale formants with the active note around C3
   volume: number;       // 0.0 to 1.0
   attack: number;       // envelope attack (seconds)
+  attackCurve?: number;  // 0 = linear, 1 = exponential
   decay: number;        // envelope decay (seconds)
   sustain: number;      // envelope sustain (0.0 to 1.0)
   release: number;      // envelope release (seconds)
+  transientPunch?: number; // 0.0 to 1.0: initial pitch drop depth
+  transientNoise?: number; // 0.0 to 1.0: initial noise burst level
   cutoff: number;       // lowpass cutoff (20Hz to 20000Hz)
   resonance: number;    // filter Q (0.1 to 10.0)
   detune: number;       // voice detune in cents
@@ -137,6 +178,7 @@ export interface SynthParams {
   expandTilt: number;    // 0.0 to 1.0: per-voice Möbius boost, window half-width 0.4 (spectral tilt — dark → bright across the stack; works standalone)
   expandFocus: number;   // 0.0 to 1.0: per-voice operator focus, window half-width 0.3 (needs Width < all — splits the whole operator family across bands)
   expandAlpha: number;   // 0.0 to 1.0: per-voice FrFT α angle offset, ±0.4 in π/2 units mod 4 (needs α Mix > 0 — a different canonical rotation per voice)
+  expandRegime: number;  // 0.0 to 1.0: per-voice regime window offset, window half-width 0.5 in asym (needs Regime > 0 — each voice breaks into the second rule at a different point of the wave)
 }
 
 export type ProjectionMode = 'phasespace' | 'torus' | 'ribbon';

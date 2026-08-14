@@ -11,6 +11,8 @@ export interface ParamSpec {
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const deg = (v: number) => `${Math.round((v * 180) / Math.PI)}°`;
+/** Degrees for a value already expressed in cycles (0..1) rather than radians. */
+const deg2 = (v: number) => `${Math.round(v * 360)}°`;
 const f2 = (v: number) => v.toFixed(2);
 const VOWEL_NAMES = ['A', 'E', 'I', 'O', 'U'];
 const vowel = (v: number) => VOWEL_NAMES[Math.round(v * (VOWEL_NAMES.length - 1))];
@@ -29,6 +31,19 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   arithDecay: { label: 'Falloff s', min: 0.25, max: 2, step: 0.01, defaultValue: 1, format: f2 },
   arithSwell: { label: 'Swell', min: 0, max: 1.5, step: 0.01, defaultValue: 0.7, format: f2 },
   arithSeqCount: { label: 'Sequence', min: 1, max: 4, step: 1, defaultValue: 1, format: (v) => (v <= 1 ? 'static' : `${v} pts`) },
+  arithMorph: { label: 'Morph α', min: 0, max: 1, step: 0.01, defaultValue: 0.5, format: (v) => (v <= 0 ? 'Re' : v >= 1 ? 'Im' : `${Math.round(v * 100)}%`) },
+  filterEnvAmount: { label: 'Env Amt', min: -4, max: 4, step: 0.05, defaultValue: 0, format: (v) => `${v > 0 ? '+' : ''}${v.toFixed(2)}oct` },
+  // Min 0, not 0.005: a drum wants the filter open on the sample it starts, and the engine
+  // already floors the ramp at 1 ms (`Math.max(0.001, p.filterEnvAttack)`), so the rail was
+  // keeping a reachable setting out of the UI for no gain.
+  filterEnvAttack: { label: 'Env Atk', min: 0, max: 2, step: 0.005, defaultValue: 0.02, format: (v) => (v <= 0 ? 'instant' : `${v.toFixed(3)}s`) },
+  filterEnvDecay: { label: 'Env Dec', min: 0.005, max: 2, step: 0.005, defaultValue: 0.35, format: (v) => `${v.toFixed(3)}s` },
+  filterEnvSustain: { label: 'Env Sus', min: 0, max: 1, step: 0.01, defaultValue: 0.3, format: pct },
+  subGain: { label: 'Sub', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
+  // Max 1, matching `subGain`: the two are siblings summed into the same voice gain, and
+  // `transientNoise` on that node already reaches 1, so the old 0.5 ceiling was arbitrary —
+  // it just made a noise-led patch (a snare) impossible to write.
+  noiseGain: { label: 'Noise', min: 0, max: 1, step: 0.005, defaultValue: 0, format: pct },
   arithWarp: { label: 'Warp', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   arithAngle: { label: 'Warp Dir', min: 0, max: 2 * Math.PI, step: 0.05, defaultValue: 0, format: deg },
   crossMix: { label: 'Mix', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
@@ -62,6 +77,13 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   spectralFold: { label: 'Downfold', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   foldPeriod: { label: 'Fold K', min: 2, max: 16, step: 1, defaultValue: 8, format: (v) => `K${v}` },
   interfere: { label: 'Interfere', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
+  regimeMix: { label: 'Regime', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
+  regimeThreshold: { label: 'Window', min: 0.05, max: 1, step: 0.01, defaultValue: 0.5, format: f2 },
+  regimeAsym: { label: 'Offset', min: -1, max: 1, step: 0.01, defaultValue: 0, format: f2 },
+  regimeRail: { label: 'Rail', min: -1, max: 1, step: 0.01, defaultValue: 0, format: f2 },
+  regimeOffsetUp: { label: 'Skip ↑', min: 0, max: 1, step: 0.01, defaultValue: 0, format: deg2 },
+  regimeOffsetDn: { label: 'Skip ↓', min: 0, max: 1, step: 0.01, defaultValue: 0.5, format: deg2 },
+  regimeKnee: { label: 'Knee', min: 0, max: 1, step: 0.01, defaultValue: 0, format: (v) => (v <= 0 ? 'hard' : pct(v)) },
   zeroStretch: { label: 'Stretch', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   zeroInsert: { label: 'Insert', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   frftAngle: { label: 'α Angle', min: 0, max: 4, step: 0.005, defaultValue: 0, format: (v) => `${(v * 90).toFixed(1)}°` },
@@ -82,6 +104,8 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   decay: { label: 'Decay', min: 0.05, max: 2, step: 0.05, defaultValue: 0.2, format: (v) => `${v.toFixed(2)}s` },
   sustain: { label: 'Sustain', min: 0, max: 1, step: 0.05, defaultValue: 0.6, format: pct },
   release: { label: 'Release', min: 0.01, max: 4, step: 0.05, defaultValue: 0.3, format: (v) => `${v.toFixed(2)}s` },
+  transientPunch: { label: 'Punch', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
+  transientNoise: { label: 'Snap', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   unisonVoices: { label: 'Unison', min: 1, max: 5, step: 1, defaultValue: 2, format: (v) => `${v}×` },
   detune: { label: 'Detune', min: 0, max: 35, step: 1, defaultValue: 8, format: (v) => `${v}¢` },
   expandAmount: { label: 'Diverge', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
@@ -90,6 +114,7 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   expandTilt: { label: 'Tilt Spr', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   expandFocus: { label: 'Band Spr', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   expandAlpha: { label: 'α Spread', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
+  expandRegime: { label: 'Regime Spr', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   spaceBoost: { label: 'Dominance', min: -1, max: 1, step: 0.01, defaultValue: 0, format: f2 },
   spaceAngle: { label: 'Space Dir', min: 0, max: 2 * Math.PI, step: 0.05, defaultValue: 0, format: deg },
   dopplerMix: { label: 'Reverb', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
@@ -113,3 +138,15 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   parityKeyTrack: { label: 'Key Track', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   volume: { label: 'Master', min: 0, max: 1, step: 0.01, defaultValue: 0.7, format: pct },
 };
+
+/** How many editable coefficient pairs the arithmetic curve exposes (harmonics k = 1..N). */
+export const ARITH_COEFF_PAIRS = 8;
+
+// The editable curve coefficients are mechanical, so their specs are generated rather than
+// written out. They land in PARAM_SPECS like any other knob, which is what makes each one
+// MIDI-learnable and LFO-assignable individually.
+for (let k = 1; k <= ARITH_COEFF_PAIRS; k++) {
+  const specs = PARAM_SPECS as Record<string, ParamSpec>;
+  specs[`arithD${k}`] = { label: `d${k}`, min: -1, max: 1, step: 0.01, defaultValue: 0, format: f2 };
+  specs[`arithE${k}`] = { label: `e${k}`, min: -1, max: 1, step: 0.01, defaultValue: 0, format: f2 };
+}

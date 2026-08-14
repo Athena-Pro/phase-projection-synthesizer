@@ -80,7 +80,7 @@ export default function Display({ params, mode, isPlaying, referenceNote, bypass
 
   return (
     <div className="flex flex-col border border-silk/25 rounded-sm overflow-hidden">
-      <div className="phosphor relative h-[228px]">
+      <div className="phosphor relative aspect-[4/3] md:aspect-auto md:h-[228px]">
         {mode === 'scope' && <Scope fourier={fourier} params={params} />}
         {mode === 'spect' && (
           <Spectrum fourier={fourier} params={params} referenceFrequency={referenceFrequency} />

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { SynthParams } from '../types';
-import { PARAM_SPECS } from '../lib/paramSpecs';
+import { PARAM_SPECS, ARITH_COEFF_PAIRS } from '../lib/paramSpecs';
 import { Knob, HardwareSection, SegmentGroup } from './ui';
 import { DisplayMode } from './Display';
 
@@ -38,8 +38,55 @@ const ARITH_NUMBER_CHIPS = [
 /** The sequence's later points, in walk order (point 1 is `arithValue`). */
 const SEQ_FIELDS = ['arithValue2', 'arithValue3', 'arithValue4'] as const;
 
-const ARITH_MAP_LABELS = ['raw', 'exp', 'joukowsky', 'möbius'];
-const ARITH_EXTRACT_LABELS = ['real', 'imag', 'radius'];
+const ARITH_MAP_LABELS = ['raw', 'exp', 'joukowsky', 'möbius', 'sc'];
+const SUB_WAVE_LABELS = ['sine', 'square', 'triangle'];
+
+/** Zero every editable coefficient pair. */
+function zeroCoeffs(): Partial<SynthParams> {
+  const out: Record<string, number> = {};
+  for (let k = 1; k <= ARITH_COEFF_PAIRS; k++) {
+    out[`arithD${k}`] = 0;
+    out[`arithE${k}`] = 0;
+  }
+  return out as Partial<SynthParams>;
+}
+
+/**
+ * Fill the editable pairs from the current number.
+ *
+ * `bits` reproduces exactly what bit mode would build — integer bits as cosines, fraction
+ * bits as sines — so switching to Edit and seeding is sound-preserving, and every slider
+ * then starts from a value the number actually chose. `digits` instead maps each decimal
+ * digit 0–9 onto [−1, 1], which is coarser arithmetic but lands on a far richer curve
+ * immediately, since the coefficients are continuous rather than binary.
+ */
+function seedCoeffs(params: SynthParams, source: 'bits' | 'digits'): Partial<SynthParams> {
+  const out: Record<string, number> = {};
+  const value = Math.abs(params.arithValue);
+  if (source === 'bits') {
+    let intPart = Math.floor(value);
+    let frac = value - intPart;
+    for (let k = 1; k <= ARITH_COEFF_PAIRS; k++) {
+      out[`arithD${k}`] = intPart % 2;
+      intPart = Math.floor(intPart / 2);
+      frac *= 2;
+      const bit = frac >= 1 ? 1 : 0;
+      frac -= bit;
+      out[`arithE${k}`] = bit;
+    }
+    return out as Partial<SynthParams>;
+  }
+  const digits = String(value).replace(/[^0-9]/g, '') || '0';
+  for (let k = 1; k <= ARITH_COEFF_PAIRS; k++) {
+    const d = Number(digits[(2 * (k - 1)) % digits.length]);
+    const e = Number(digits[(2 * (k - 1) + 1) % digits.length]);
+    out[`arithD${k}`] = Number((((d - 4.5) / 4.5)).toFixed(2));
+    out[`arithE${k}`] = Number((((e - 4.5) / 4.5)).toFixed(2));
+  }
+  return out as Partial<SynthParams>;
+}
+const ARITH_EXTRACT_LABELS = ['real', 'imag', 'radius', 'morph'];
+const REGIME_SOURCE_LABELS = ['bend A', 'bend B', 'number', 'self'];
 
 /** Accept a decimal, or a fraction like "22/7". Returns null for anything unusable. */
 function parseNumberEntry(text: string): number | null {
@@ -207,6 +254,90 @@ export default function SynthControls({
   // coefficients of the curve's log radius), pushed through a conformal map, one lap of which
   // becomes the cycle. Number is a typed field rather than a knob — it is an arbitrary value,
   // not a range to sweep — with chips for the constants worth hearing.
+  // Eight editable coefficient pairs for the arithmetic curve, shown only in Edit mode.
+  // Laid out as two rows of mini-faders — cosines above, sines below — so the shape of the
+  // log radius reads at a glance rather than as sixteen anonymous knobs.
+  const coeffEditor = (
+    <div className="flex flex-col gap-1 mb-1.5 border-t border-silk/15 pt-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[8px] tracking-wider uppercase text-dim">Coefficients</span>
+        <button
+          type="button"
+          onClick={() => onChange({ ...params, ...seedCoeffs(params, 'bits') })}
+          title="Fill the pairs from the number's binary expansion — the same curve bit mode would give, now editable"
+          className="px-1.5 h-5 rounded-[3px] border border-silk/25 bg-face2 text-dim hover:border-silk/50 text-[8px] uppercase tracking-wider"
+        >
+          Seed ← bits
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange({ ...params, ...seedCoeffs(params, 'digits') })}
+          title="Fill the pairs from the number's decimal digits mapped to ±1 — richer than bits, and immediately musical"
+          className="px-1.5 h-5 rounded-[3px] border border-silk/25 bg-face2 text-dim hover:border-silk/50 text-[8px] uppercase tracking-wider"
+        >
+          Seed ← digits
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange({ ...params, ...zeroCoeffs() })}
+          title="Clear every pair to zero"
+          className="px-1.5 h-5 rounded-[3px] border border-silk/25 bg-face2 text-dim hover:border-silk/50 text-[8px] uppercase tracking-wider"
+        >
+          Clear
+        </button>
+      </div>
+      {(['D', 'E'] as const).map((band) => (
+        <div key={band} className="flex items-end gap-1">
+          <span className="text-[8px] uppercase text-dim w-8 shrink-0 pb-1">
+            {params.arithMap === 4
+              ? band === 'D'
+                ? 'pre'
+                : 'β'
+              : band === 'D'
+                ? 'cos'
+                : 'sin'}
+          </span>
+          {Array.from({ length: ARITH_COEFF_PAIRS }, (_, i) => {
+            const key = `arith${band}${i + 1}` as keyof SynthParams;
+            const value = params[key] as number;
+            const sc = params.arithMap === 4;
+            return (
+              <label key={key} className="flex flex-col items-center gap-0.5 flex-1 min-w-0">
+                <input
+                  type="range"
+                  min={-1}
+                  max={1}
+                  step={0.01}
+                  value={value}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    onChange({ ...params, [key]: v });
+                    onTouch(
+                      key,
+                      sc
+                        ? `${band === 'D' ? 'pre' : 'β'} ${i + 1}`
+                        : `${band === 'D' ? 'cos' : 'sin'} ${i + 1}`,
+                      v.toFixed(2)
+                    );
+                  }}
+                  title={
+                    sc
+                      ? band === 'D'
+                        ? `Prevertex ${i + 1} arc spacing on the unit circle`
+                        : `Interior-angle weight β for vertex ${i + 1} (renormalized so Σβ = n−2)`
+                      : `Harmonic ${i + 1} ${band === 'D' ? 'cosine' : 'sine'} coefficient of the log radius`
+                  }
+                  className="w-full accent-[#58ff8d] h-1"
+                />
+                <span className="text-[7px] text-dim tabular-nums">{i + 1}</span>
+              </label>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+
   const arithmeticSection = (
     <HardwareSection title="Arithmetic · Boundary" className="sm:col-span-2">
       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -295,7 +426,13 @@ export default function SynthControls({
           <SegmentGroup
             value={params.arithMap}
             onChange={(v) => {
-              onChange({ ...params, arithMap: v });
+              onChange({
+                ...params,
+                arithMap: v,
+                // SC reads the coefficient pairs as a polygon — switch into edit so the
+                // pre/β faders are live rather than shadowed by the binary expansion.
+                ...(v === 4 ? { arithCoeffMode: 1 } : {}),
+              });
               onTouch('arithMap', 'Conformal', ARITH_MAP_LABELS[v] ?? 'none');
             }}
             options={[
@@ -303,6 +440,11 @@ export default function SynthControls({
               { id: 1, label: 'exp', hint: 'w = e^{kz} — entire, so the curve stays closed; wraps the radial wobble into an exponential horn' },
               { id: 2, label: 'jouk', hint: 'Joukowsky w = z + c²/z — the aerofoil map; folds the curve into a cusped wing, adding odd-harmonic edge' },
               { id: 3, label: 'möb', hint: 'Möbius disk automorphism w = (z−a)/(1−āz) — slides the curve off-center inside the disk, an asymmetric squash' },
+              {
+                id: 4,
+                label: 'sc',
+                hint: 'Schwarz–Christoffel polygon — coefficient pairs become prevertex spacings (D) and interior-angle weights (E); the unit circle maps to the polygon boundary. Prefer Edit mode.',
+              },
             ]}
           />
           <SegmentGroup
@@ -315,6 +457,96 @@ export default function SynthControls({
               { id: 0, label: 're', hint: 'Read the real part of the mapped curve as the cycle' },
               { id: 1, label: 'im', hint: 'Read the imaginary part — the same curve a quarter-turn round, a different waveform from one shape' },
               { id: 2, label: '|w|', hint: 'Read the radius — always positive before DC removal, so the cycle follows the shape profile rather than tracing it' },
+              { id: 3, label: 'mrf', hint: 'Morph — blend the readout between real and imaginary along a chord or geodesic (Morph α + chord/geo)' },
+            ]}
+          />
+          <SegmentGroup
+            value={params.arithCoeffMode}
+            onChange={(v) => {
+              onChange({ ...params, arithCoeffMode: v });
+              onTouch('arithCoeffMode', 'Coefficients', v === 1 ? 'edit' : 'number bits');
+            }}
+            options={[
+              { id: 0, label: 'bits', hint: "Coefficients come from the number's binary expansion, up to 52 terms" },
+              { id: 1, label: 'edit', hint: 'Coefficients are the eight editable pairs below — continuous values the bits cannot reach. Seed them from the number, then dial.' },
+            ]}
+          />
+        </div>
+        {params.arithExtract === 3 && (
+          <>
+            {knob('arithMorph')}
+            <div className="flex flex-col gap-1 pt-1">
+              <SegmentGroup
+                value={params.arithMorphMode}
+                onChange={(v) => {
+                  onChange({ ...params, arithMorphMode: v });
+                  onTouch(
+                    'arithMorphMode',
+                    'Morph path',
+                    v === 1 ? 'geodesic' : 'chord'
+                  );
+                }}
+                options={[
+                  {
+                    id: 0,
+                    label: 'chord',
+                    hint: 'Linear blend (1−α)·Re + α·Im — the original morph axis',
+                  },
+                  {
+                    id: 1,
+                    label: 'geo',
+                    hint: 'Geodesic axis rotation Re·cos(απ/2) + Im·sin(απ/2) — same endpoints, unit-gain mid-path',
+                  },
+                ]}
+              />
+            </div>
+          </>
+        )}
+      </div>
+      {params.arithCoeffMode >= 0.5 && coeffEditor}
+    </HardwareSection>
+  );
+
+  const filterEnvSection = (
+    <HardwareSection title="Filter · Envelope">
+      <div className="flex flex-wrap items-start gap-x-2.5 gap-y-1.5">
+        {knob('cutoff')}
+        {knob('resonance')}
+        {knob('filterEnvAmount')}
+        {knob('filterEnvAttack')}
+        {knob('filterEnvDecay')}
+        {knob('filterEnvSustain')}
+      </div>
+    </HardwareSection>
+  );
+
+  const subNoiseSection = (
+    <HardwareSection title="Sub · Noise">
+      <div className="flex flex-wrap items-start gap-x-2.5 gap-y-1.5">
+        {knob('subGain')}
+        {knob('noiseGain')}
+        <div className="flex flex-col gap-1 pt-1">
+          <SegmentGroup
+            value={params.subWave}
+            onChange={(v) => {
+              onChange({ ...params, subWave: v });
+              onTouch('subGain', 'Sub wave', SUB_WAVE_LABELS[v] ?? 'sine');
+            }}
+            options={[
+              { id: 0, label: 'sin', hint: 'Sine sub — pure weight, no harmonics of its own' },
+              { id: 1, label: 'sqr', hint: 'Square sub — hollow and present, adds odd harmonics under the note' },
+              { id: 2, label: 'tri', hint: 'Triangle sub — between the two, a soft edge' },
+            ]}
+          />
+          <SegmentGroup
+            value={params.subOctave}
+            onChange={(v) => {
+              onChange({ ...params, subOctave: v });
+              onTouch('subGain', 'Sub octave', v === 1 ? '−2 oct' : '−1 oct');
+            }}
+            options={[
+              { id: 0, label: '−1', hint: 'One octave below the played note' },
+              { id: 1, label: '−2', hint: 'Two octaves below — sub-bass weight' },
             ]}
           />
         </div>
@@ -324,11 +556,30 @@ export default function SynthControls({
 
   const envelopeSection = (
     <HardwareSection title="Envelope">
-      <div className="flex flex-wrap gap-x-2.5 gap-y-1.5">
-        {knob('attack')}
-        {knob('decay')}
-        {knob('sustain')}
-        {knob('release')}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-start gap-x-2.5 gap-y-1.5">
+          {knob('attack')}
+          {knob('decay')}
+          {knob('sustain')}
+          {knob('release')}
+          <div className="flex flex-col gap-1 pt-1">
+            <SegmentGroup
+              value={params.attackCurve ?? 0}
+              onChange={(v) => {
+                onChange({ ...params, attackCurve: v });
+                onTouch('attackCurve', 'Curve', v === 1 ? 'exp' : 'lin');
+              }}
+              options={[
+                { id: 0, label: 'lin', hint: 'Linear attack' },
+                { id: 1, label: 'exp', hint: 'Exponential attack (snappy)' },
+              ]}
+            />
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-2.5 gap-y-1.5 border-t border-silk/10 pt-2">
+          {knob('transientPunch')}
+          {knob('transientNoise')}
+        </div>
       </div>
     </HardwareSection>
   );
@@ -579,11 +830,36 @@ export default function SynthControls({
   );
 
   const filterSection = (
-    <HardwareSection title="Filter">
-      <div className="flex flex-wrap gap-x-2.5 gap-y-1.5">
-        {knob('harmonicsCount')}
-        {knob('cutoff')}
-        {knob('resonance')}
+    <HardwareSection title="Resolution">
+      <div className="flex flex-wrap gap-x-2.5 gap-y-1.5">{knob('harmonicsCount')}</div>
+    </HardwareSection>
+  );
+
+  const regimeSection = (
+    <HardwareSection title="Regime · split">
+      <div className="flex flex-wrap items-start gap-x-2.5 gap-y-1.5">
+        {knob('regimeMix')}
+        {knob('regimeThreshold')}
+        {knob('regimeAsym')}
+        {knob('regimeRail')}
+        {knob('regimeOffsetUp')}
+        {knob('regimeOffsetDn')}
+        {knob('regimeKnee')}
+        <div className="flex flex-col gap-1 pt-1">
+          <SegmentGroup
+            value={params.regimeSource}
+            onChange={(v) => {
+              onChange({ ...params, regimeSource: v });
+              onTouch('regimeSource', 'Rule B', REGIME_SOURCE_LABELS[v] ?? '—');
+            }}
+            options={[
+              { id: 0, label: 'bend A', hint: 'The single-bend A cycle — the same layer the tensor crossing reads as F_A' },
+              { id: 1, label: 'bend B', hint: 'The single-bend B cycle (shaped by Bend B / Amt B), the tensor layer F_B' },
+              { id: 2, label: 'number', hint: 'The arithmetic boundary curve — the bent saw below the window, the number-as-a-curve above it. Works whether or not Number is blended into the main cycle' },
+              { id: 3, label: 'self', hint: 'The fused cycle itself at a phase offset, so the wave is spliced against a displaced copy of itself — the closest analogue of a regime oscillator swapping between two phases of one rule' },
+            ]}
+          />
+        </div>
       </div>
     </HardwareSection>
   );
@@ -732,6 +1008,7 @@ export default function SynthControls({
         {knob('expandTilt')}
         {knob('expandFocus')}
         {knob('expandAlpha')}
+        {knob('expandRegime')}
       </div>
     </HardwareSection>
   );
@@ -743,7 +1020,10 @@ export default function SynthControls({
       <>
         {oscillatorSection}
         {arithmeticSection}
+        {regimeSection}
         {envelopeSection}
+        {filterEnvSection}
+        {subNoiseSection}
       </>
     ),
     spect: (
