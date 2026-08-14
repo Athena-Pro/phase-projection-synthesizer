@@ -314,15 +314,23 @@ function fingerprint(p: SynthParams) {
   // Everything audible that never reaches computeFourierSeries: the effects chain, the
   // amplitude envelope, the voicing and the field. Two patches with the same partials but a
   // different room and envelope are not duplicates.
+  // The voice layer belongs here too, and its absence was a real blind spot: a kick and a
+  // snare built on the same cycle and the same amplitude envelope differ *only* in sub,
+  // noise, filter sweep and transient, none of which reach `computeFourierSeries` — so the
+  // two read as the same patch. Adding dimensions can only raise the max difference between
+  // two patches, never lower it, so this can resolve a false duplicate but never invent one.
   const aux = [
     p.dopplerMix, p.dopplerMode, (p.dopplerShift + 12) / 24, p.dopplerSize, p.dopplerDecay,
     p.dopplerDamp, p.dopplerSpeed, p.dopplerRate / 8,
     p.parityMix, p.parityBias, p.parityDrive, p.parityReso, p.parityReverb, p.parityFormant,
     p.parityVowelUp, p.parityVowelDn, p.parityKeyTrack, p.parityToneUp / 12000, p.parityToneDn / 12000,
     p.fxRouting, p.spaceBoost, p.spaceAngle / (2 * Math.PI), p.volume,
-    p.attack / 2, p.decay / 2, p.sustain, p.release / 4,
+    p.attack / 2, p.decay / 2, p.sustain, p.release / 4, p.attackCurve ?? 0,
     p.unisonVoices / 5, p.detune / 35, p.motionDepth, p.extendMix, p.extendBloom,
     p.alphaEnvDepth, p.expandAmount,
+    p.subGain, p.subWave / 2, p.subOctave, p.noiseGain,
+    p.filterEnvAmount / 8, p.filterEnvAttack / 2, p.filterEnvDecay / 2, p.filterEnvSustain,
+    p.transientPunch ?? 0, p.transientNoise ?? 0,
   ];
   return { finite, peak, energy, centroid, oddShare: energy > 0 ? odd / (odd + even) : 0, profile, aux };
 }

@@ -33,11 +33,17 @@ export const PARAM_SPECS: Partial<Record<keyof SynthParams, ParamSpec>> = {
   arithSeqCount: { label: 'Sequence', min: 1, max: 4, step: 1, defaultValue: 1, format: (v) => (v <= 1 ? 'static' : `${v} pts`) },
   arithMorph: { label: 'Morph α', min: 0, max: 1, step: 0.01, defaultValue: 0.5, format: (v) => (v <= 0 ? 'Re' : v >= 1 ? 'Im' : `${Math.round(v * 100)}%`) },
   filterEnvAmount: { label: 'Env Amt', min: -4, max: 4, step: 0.05, defaultValue: 0, format: (v) => `${v > 0 ? '+' : ''}${v.toFixed(2)}oct` },
-  filterEnvAttack: { label: 'Env Atk', min: 0.005, max: 2, step: 0.005, defaultValue: 0.02, format: (v) => `${v.toFixed(3)}s` },
+  // Min 0, not 0.005: a drum wants the filter open on the sample it starts, and the engine
+  // already floors the ramp at 1 ms (`Math.max(0.001, p.filterEnvAttack)`), so the rail was
+  // keeping a reachable setting out of the UI for no gain.
+  filterEnvAttack: { label: 'Env Atk', min: 0, max: 2, step: 0.005, defaultValue: 0.02, format: (v) => (v <= 0 ? 'instant' : `${v.toFixed(3)}s`) },
   filterEnvDecay: { label: 'Env Dec', min: 0.005, max: 2, step: 0.005, defaultValue: 0.35, format: (v) => `${v.toFixed(3)}s` },
   filterEnvSustain: { label: 'Env Sus', min: 0, max: 1, step: 0.01, defaultValue: 0.3, format: pct },
   subGain: { label: 'Sub', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
-  noiseGain: { label: 'Noise', min: 0, max: 0.5, step: 0.005, defaultValue: 0, format: pct },
+  // Max 1, matching `subGain`: the two are siblings summed into the same voice gain, and
+  // `transientNoise` on that node already reaches 1, so the old 0.5 ceiling was arbitrary —
+  // it just made a noise-led patch (a snare) impossible to write.
+  noiseGain: { label: 'Noise', min: 0, max: 1, step: 0.005, defaultValue: 0, format: pct },
   arithWarp: { label: 'Warp', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
   arithAngle: { label: 'Warp Dir', min: 0, max: 2 * Math.PI, step: 0.05, defaultValue: 0, format: deg },
   crossMix: { label: 'Mix', min: 0, max: 1, step: 0.01, defaultValue: 0, format: pct },
