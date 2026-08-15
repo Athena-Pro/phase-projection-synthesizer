@@ -131,16 +131,12 @@ class PhaseProjectionVoice extends AudioWorkletProcessor {
     const N = this.curR.length - 1;
     const nMax = Math.min(N, Math.floor(sampleRate / 2 / Math.max(1, freq)));
 
-    // Morph position for this block (raised-cosine LFO between frame A and B)
-    const m = this.morphDepth * 0.5 * (1 - Math.cos(this.lfoPhase));
-    this.lfoPhase += (2 * Math.PI * this.morphRate * out.length) / sampleRate;
-    if (this.lfoPhase > 2 * Math.PI) this.lfoPhase -= 2 * Math.PI;
-
     // Per-note genesis envelope: sweep the base spectrum between the birth endpoint (a0)
     // and the settled endpoint (a1) as the note ages. Both the α-domain sweep (FrFT/LCT
     // off -> on) and the Möbius flow (identity -> set transform) ride this one morph, so
     // the gate opens for either. mode 0 rises over the attack, mode 1 falls. The
-    // per-block position makes it an audio-rate morph of the spectral structure.
+    // stage position is block-rate; the independent spectral-motion LFO below advances
+    // per sample so high-rate modulation does not turn into a 128-sample staircase.
     const envDepth = Math.max(this.alphaDepth, this.flowDepth, this.seqDepth);
     const stagesR = this.stagesR;
     const alphaOn = envDepth > 0.001 && stagesR && stagesR.length >= 2;
@@ -187,58 +183,64 @@ class PhaseProjectionVoice extends AudioWorkletProcessor {
       s1R = stagesR[lo + 1]; s1I = stI[lo + 1];
     }
 
-    // Smooth current coefficients toward the morphed target
-    const k = 1 - Math.exp(-out.length / (0.015 * sampleRate));
+    // Resolve the genesis-stage base once per render quantum. The spectral-motion target
+    // and its 15 ms smoothing are evaluated per sample in the renderer below.
     const aR = this.frameA.r, aI = this.frameA.i;
     const bR = this.frameB.r, bI = this.frameB.i;
     const cR = this.curR, cI = this.curI;
+    const baseR = this.effR, baseI = this.effI;
     for (let n = 1; n <= N; n++) {
-      const baseR = alphaOn ? s0R[n] + (s1R[n] - s0R[n]) * frac : aR[n];
-      const baseI = alphaOn ? s0I[n] + (s1I[n] - s0I[n]) * frac : aI[n];
-      cR[n] += (baseR + (bR[n] - baseR) * m - cR[n]) * k;
-      cI[n] += (baseI + (bI[n] - baseI) * m - cI[n]) * k;
+      baseR[n] = alphaOn ? s0R[n] + (s1R[n] - s0R[n]) * frac : aR[n];
+      baseI[n] = alphaOn ? s0I[n] + (s1I[n] - s0I[n]) * frac : aI[n];
     }
 
-    // Effective spectrum for this block: main + residue on its per-harmonic clock
-    const eR = this.effR, eI = this.effI;
     const hasRes = this.resR && this.extendMix > 0.001;
-    if (hasRes) {
-      const rR = this.resR, rI = this.resI;
-      const mix = this.extendMix;
-      const bloom = this.extendBloom > 0.5;
-      const age = this.age;
-      for (let n = 1; n <= nMax; n++) {
-        const d = Math.exp(-age * this.envRates[n]);
-        const env = mix * (bloom ? 1 - d : d);
-        eR[n] = cR[n] + rR[n] * env;
-        eI[n] = cI[n] + rI[n] * env;
-      }
-    } else {
-      for (let n = 1; n <= nMax; n++) {
-        eR[n] = cR[n];
-        eI[n] = cI[n];
-      }
-    }
+    const rR = this.resR, rI = this.resI;
+    const residueMix = this.extendMix;
+    const bloom = this.extendBloom > 0.5;
+    const smooth = 1 - Math.exp(-1 / (0.015 * sampleRate));
+    const lfoInc = (2 * Math.PI * this.morphRate) / sampleRate;
+    let lfoPhase = this.lfoPhase;
 
-    // Chebyshev-style recurrence: cos/sin(nφ) from cos/sin((n-1)φ)
+    // Chebyshev-style recurrence: cos/sin(nφ) from cos/sin((n-1)φ). Periodic
+    // renormalization keeps accumulated floating-point rotation error on the unit circle.
     let phase = this.phase;
     for (let s = 0; s < out.length; s++) {
+      const m = this.morphDepth * 0.5 * (1 - Math.cos(lfoPhase));
       const c1 = Math.cos(phase);
       const s1 = Math.sin(phase);
       let cn = c1;
       let sn = s1;
       let acc = 0;
       for (let n = 1; n <= nMax; n++) {
-        acc += eR[n] * cn + eI[n] * sn;
+        cR[n] += (baseR[n] + (bR[n] - baseR[n]) * m - cR[n]) * smooth;
+        cI[n] += (baseI[n] + (bI[n] - baseI[n]) * m - cI[n]) * smooth;
+        let effectiveR = cR[n];
+        let effectiveI = cI[n];
+        if (hasRes) {
+          const decay = Math.exp(-(this.age + s) * this.envRates[n]);
+          const env = residueMix * (bloom ? 1 - decay : decay);
+          effectiveR += rR[n] * env;
+          effectiveI += rI[n] * env;
+        }
+        acc += effectiveR * cn + effectiveI * sn;
         const cNext = cn * c1 - sn * s1;
         sn = sn * c1 + cn * s1;
         cn = cNext;
+        if ((n & 31) === 0 && n < nMax) {
+          const inv = 1 / Math.hypot(cn, sn);
+          cn *= inv;
+          sn *= inv;
+        }
       }
       out[s] = acc;
       phase += inc;
       if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+      lfoPhase += lfoInc;
+      if (lfoPhase > 2 * Math.PI) lfoPhase -= 2 * Math.PI;
     }
     this.phase = phase;
+    this.lfoPhase = lfoPhase;
     this.age += out.length;
     return true;
   }

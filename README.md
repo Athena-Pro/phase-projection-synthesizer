@@ -71,6 +71,11 @@ waveform too. See `arithmeticCycle` in `src/lib/audioEngine.ts`.
 
 ### Time-domain, pre-projection
 
+These stages are expressed as a typed operator program (`regime → zero pivot → LCT`) rather
+than as independent branches in the engine. Each node declares its domain and algebraic
+properties, and the same implementations power both the normal audio path and the Operator
+Laboratory.
+
 - **Zero-crossing pivot** — the cycle is cut at its zero crossings (where the state
   `[f : f′]` passes through `[0 : 1]`). *Stretch* dilates time around each crossing;
   *insert* splices sign-reflected lobes in at the crossings, re-emerging with reversed
@@ -97,6 +102,30 @@ waveform too. See `arithmeticCycle` in `src/lib/audioEngine.ts`.
   every angle), composed with a metaplectic *squeeze* (hyperbolic) and *shear* (parabolic).
   α = 90° turns the waveform into its own spectrum; intermediate angles give dispersive,
   chirp-folded hybrids. See `src/lib/frft.ts`.
+
+### The projection seam
+
+Harmonic projection is an explicit operation, not an inline implementation detail:
+
+```
+Π_{N,fs,f0} : represented cycle → admissible harmonic subspace
+```
+
+`src/lib/harmonicProjection.ts` owns the projection, reconstruction, DC metadata, and
+Nyquist limit. This makes `Π(Tx)` and `T(Πx)` directly comparable and turns their difference
+`[Π,T]x` into a measurable — and audible — representation defect.
+
+### Operator Laboratory
+
+The **Operator Lab** display chooses two configured pre-projection operators A and B (regime
+split, zero pivot, or LCT), then exposes `A(x)`, `B(x)`, `A∘B(x)`, `B∘A(x)`, `[A,B](x)`,
+`ΠA(x)`, `AΠ(x)`, and `[Π,A](x)`. AB and BA remain overlaid while the selected result is
+shown; **Audition** routes that result through the normal harmonic and voice pipeline.
+
+The readout reports commutator energy, complex spectral cosine distance, magnitude and phase
+distance, entropy, spectral centroid, and projection loss. The operators use the current
+patch settings, so the relevant Regime, Pivot, LCT, and Resolution controls sit directly
+under the laboratory display.
 
 ### Group actions on the spectrum
 
@@ -260,9 +289,10 @@ does nothing in the ear.
 
 A compact 70s-hardware faceplate. Rotary knobs drag vertically (Shift for fine control,
 double-click to reset, arrow keys to nudge), and the control sections are packed under the
-display mode they shape: the green-phosphor window's five modes — single-cycle scope, harmonic
-spectrum, tensor-product heatmap, CP¹ Riemann spheres, and a 3D phase-space orbit — double as
-the control-domain selector. An Output · FX · Master strip stays reachable from every view.
+display mode they shape: the green-phosphor window's six modes — single-cycle scope, harmonic
+spectrum, tensor-product heatmap, CP¹ Riemann spheres, a 3D phase-space orbit, and the
+Operator Laboratory — double as the control-domain selector. An Output · FX · Master strip
+stays reachable from every view.
 
 - **LINK (pitch lock)** — couples Amt B and Angle Φ along the constant-pitch curve
   `sin(Φ)·AmtB = const` (the pitch offset is `sin(Φ)·AmtB·4` semitones), so either knob
@@ -291,14 +321,19 @@ the control-domain selector. An Output · FX · Master strip stays reachable fro
 | `npm run build`          | Production build into `dist/`                  |
 | `npm run preview`        | Serve the production build                     |
 | `npm run lint`           | Type-check with `tsc`                          |
+| `npm test`               | Run mathematical property/invariant tests      |
 | `npm run check:presets`  | Validate the preset bank (see above)           |
 
 Where things live:
 
 | Path                          | What                                                        |
 | ----------------------------- | ----------------------------------------------------------- |
-| `src/lib/audioEngine.ts`      | Coefficient computation, the operator chain, voice graph     |
-| `src/lib/additiveWorklet.ts`  | The realtime harmonic bank - the only hot loop         |
+| `src/lib/audioEngine.ts`      | Coefficient computation, spectral operators, voice graph     |
+| `src/lib/operatorPipeline.ts` | Typed operator calculus and composition primitives           |
+| `src/lib/cycleOperators.ts`   | Extracted pre-projection operator program                     |
+| `src/lib/operatorLab.ts`      | A/B composition, commutators, and research metrics            |
+| `src/lib/harmonicProjection.ts` | Explicit harmonic projector Π and reconstruction           |
+| `src/lib/additiveWorklet.ts`  | The realtime harmonic bank - the only hot loop                |
 | `src/lib/frft.ts`             | Discrete fractional Fourier / linear canonical transform     |
 | `src/lib/regimeSplit.ts`      | State-conditional cycle split, applied before projection     |
 | `src/lib/dopplerReverb.ts`    | Moving-wall FDN, plus `shimmerWorklet.ts` for travel mode    |
@@ -312,6 +347,7 @@ Where things live:
 | `src/lib/schwarzChristoffel.ts` | Unit-disk SC polygon boundary for the arithmetic source    |
 | `src/lib/userSlots.ts`        | User memory slots and schema-tolerant loading                |
 | `scripts/checkPresets.ts`     | The preset validator                                         |
+| `scripts/propertyTests.ts`    | Mathematical property and invariant suite                    |
 
 The app is deliberately plugin-shaped — fixed-size editor, isolated DSP module, MIDI voice
 API. See [docs/VST-PORT.md](docs/VST-PORT.md) for the concrete route to a native VST3.

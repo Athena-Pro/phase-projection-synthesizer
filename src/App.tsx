@@ -50,6 +50,7 @@ const DISPLAY_MODES: { id: DisplayMode; label: string }[] = [
   { id: 'tensor', label: 'Tensor' },
   { id: 'cp1', label: 'CP¹' },
   { id: 'orbit', label: 'Orbit' },
+  { id: 'lab', label: 'Operator Lab' },
 ];
 
 /** Top-level pages of the fixed VST frame. */
@@ -76,6 +77,7 @@ function bypassEffects(p: SynthParams): SynthParams {
     lowCouple: 0,
     spectralFold: 0,
     interfere: 0,
+    labEnabled: 0,
     zeroStretch: 0,
     zeroInsert: 0,
     frftMix: 0,
@@ -714,6 +716,7 @@ export default function App() {
                 isPlaying={activeNotes.length > 0}
                 referenceNote={activeNotes[activeNotes.length - 1] ?? lastPlayedNote}
                 bypassed={fxBypass}
+                onChange={handleParamsChange}
               />
 
               {/* Display-visual selector */}

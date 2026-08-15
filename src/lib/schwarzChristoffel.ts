@@ -10,6 +10,19 @@
  * `soften` ∈ [0, 1] blends β toward the regular n-gon (rounder corners).
  */
 
+export interface SchwarzChristoffelDiagnostics {
+  /** |f(2π)-f(0)| before the linear closure correction. */
+  closureDefect: number;
+  /** RMS size of the correction that was bled across the discretized boundary. */
+  correctionEnergy: number;
+  /** Largest discrete second difference after correction and accessory scaling. */
+  maxCurvature: number;
+  /** Smallest chord distance between adjacent prevertices on S¹. */
+  prevertexProximity: number;
+  /** Log-amplitude/log-harmonic regression over eight upper-band samples. */
+  spectralTailSlope: number;
+}
+
 export function schwarzChristoffelBoundary(
   d: Float64Array,
   e: Float64Array,
@@ -17,7 +30,7 @@ export function schwarzChristoffelBoundary(
   soften: number,
   cAbs: number,
   cAng: number
-): { re: Float64Array; im: Float64Array } {
+): { re: Float64Array; im: Float64Array; diagnostics: SchwarzChristoffelDiagnostics } {
   const nMax = Math.min(d.length, e.length);
   let n = 3;
   for (let k = 0; k < nMax; k++) {
@@ -38,6 +51,14 @@ export function schwarzChristoffelBoundary(
     zkR[k] = Math.cos(phi);
     zkI[k] = Math.sin(phi);
     phi += (2 * Math.PI * space[k]) / spaceSum;
+  }
+  let prevertexProximity = Infinity;
+  for (let k = 0; k < n; k++) {
+    const next = (k + 1) % n;
+    prevertexProximity = Math.min(
+      prevertexProximity,
+      Math.hypot(zkR[k] - zkR[next], zkI[k] - zkI[next])
+    );
   }
 
   const target = n - 2;
@@ -123,11 +144,17 @@ export function schwarzChristoffelBoundary(
   // Bleed off trapezoid drift so the polygon closes.
   const endR = re[K - 1];
   const endI = im[K - 1];
+  const closureDefect = Math.hypot(endR, endI);
+  let correctionSq = 0;
   for (let j = 1; j < K; j++) {
     const u = j / (K - 1);
-    re[j] -= u * endR;
-    im[j] -= u * endI;
+    const correctionR = u * endR;
+    const correctionI = u * endI;
+    correctionSq += correctionR * correctionR + correctionI * correctionI;
+    re[j] -= correctionR;
+    im[j] -= correctionI;
   }
+  const correctionEnergy = Math.sqrt(correctionSq / K);
 
   let meanR = 0;
   let meanI = 0;
@@ -147,5 +174,55 @@ export function schwarzChristoffelBoundary(
     im[j] = rr * ci + ii * cr;
   }
 
-  return { re, im };
+  let maxCurvature = 0;
+  for (let j = 0; j < K; j++) {
+    const prev = (j + K - 1) % K;
+    const next = (j + 1) % K;
+    maxCurvature = Math.max(
+      maxCurvature,
+      Math.hypot(re[next] - 2 * re[j] + re[prev], im[next] - 2 * im[j] + im[prev])
+    );
+  }
+
+  // Eight sparse DFT samples are enough for a resolution diagnostic without charging the
+  // oscillator path for a full second transform.
+  const tailX: number[] = [];
+  const tailY: number[] = [];
+  const firstTail = Math.max(2, Math.floor(K / 16));
+  const lastTail = Math.max(firstTail + 1, Math.floor(K / 4));
+  for (let q = 0; q < 8; q++) {
+    const harmonic = Math.round(firstTail * Math.pow(lastTail / firstTail, q / 7));
+    let sumR = 0;
+    let sumI = 0;
+    for (let j = 0; j < K; j++) {
+      const angle = (-2 * Math.PI * harmonic * j) / K;
+      const cs = Math.cos(angle);
+      const sn = Math.sin(angle);
+      sumR += re[j] * cs - im[j] * sn;
+      sumI += re[j] * sn + im[j] * cs;
+    }
+    tailX.push(Math.log(harmonic));
+    tailY.push(Math.log(Math.max(1e-15, Math.hypot(sumR, sumI) / K)));
+  }
+  const meanX = tailX.reduce((sum, value) => sum + value, 0) / tailX.length;
+  const meanY = tailY.reduce((sum, value) => sum + value, 0) / tailY.length;
+  let covariance = 0;
+  let variance = 0;
+  for (let i = 0; i < tailX.length; i++) {
+    covariance += (tailX[i] - meanX) * (tailY[i] - meanY);
+    variance += (tailX[i] - meanX) ** 2;
+  }
+  const spectralTailSlope = variance > 0 ? covariance / variance : 0;
+
+  return {
+    re,
+    im,
+    diagnostics: {
+      closureDefect,
+      correctionEnergy,
+      maxCurvature,
+      prevertexProximity,
+      spectralTailSlope,
+    },
+  };
 }

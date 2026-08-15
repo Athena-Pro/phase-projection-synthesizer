@@ -1,13 +1,16 @@
 import { SynthParams } from '../types';
 import { ARITH_COEFF_PAIRS } from './paramSpecs';
 import { getWorkletUrl } from './additiveWorklet';
-import { lctCycle } from './frft';
 import { DopplerReverb, DopplerParams } from './dopplerReverb';
 import { getShimmerWorkletUrl } from './shimmerWorklet';
 import { getTickerWorkletUrl } from './tickerWorklet';
 import { ParitySplit, ParityParams } from './paritySplit';
 import { schwarzChristoffelBoundary } from './schwarzChristoffel';
-import { applyRegimeSplit } from './regimeSplit';
+import { runPreProjectionProgram, CycleOperatorContext } from './cycleOperators';
+import { projectCycle } from './harmonicProjection';
+import { analyzeOperatorLab, OperatorLabAnalysis } from './operatorLab';
+
+export { applyZeroPivotTransform } from './zeroPivot';
 
 export function midiToFreq(note: number): number {
   return 440 * Math.pow(2, (note - 69) / 12);
@@ -488,101 +491,6 @@ function leastPrimitiveRoot(P: number): number {
   return 2;
 }
 
-/**
- * Zero-crossing pivot transform.
- *
- * The cycle is cut at its zero crossings — the points where the trajectory state
- * [f : f'] passes through [0 : 1], so any splice there preserves continuity.
- *
- * - `stretch` reparameterizes time inside each zero-bounded segment with a power law
- *   pivoting at both crossings: time dilates near the crossings and compresses at the
- *   lobe centers.
- * - `insert` appends, at each exit crossing, a sign-reflected time-reversed copy of the
- *   segment — the waveform re-emerges from the pivot with its Fourier direction
- *   reversed. Insert length and amplitude both scale with the parameter, so the effect
- *   fades in smoothly.
- *
- * The warped cycle is resampled back to the original length and then re-projected onto
- * exact harmonics by the DFT downstream, so the result stays pitch-locked.
- */
-export function applyZeroPivotTransform(
-  samples: number[],
-  stretch: number,
-  insert: number
-): number[] {
-  if (stretch < 0.001 && insert < 0.001) return samples;
-  const K = samples.length;
-
-  const crossings: number[] = [];
-  for (let i = 0; i < K; i++) {
-    const a = samples[i];
-    const b = samples[(i + 1) % K];
-    if ((a <= 0 && b > 0) || (a >= 0 && b < 0)) crossings.push((i + 1) % K);
-  }
-  if (crossings.length < 2) return samples;
-
-  // Circular segments between consecutive crossings
-  const segs: number[][] = [];
-  for (let c = 0; c < crossings.length; c++) {
-    const start = crossings[c];
-    const end = crossings[(c + 1) % crossings.length];
-    const seg: number[] = [];
-    let i = start;
-    while (i !== end) {
-      seg.push(samples[i]);
-      i = (i + 1) % K;
-    }
-    if (seg.length > 1) segs.push(seg);
-  }
-  if (segs.length < 2) return samples;
-
-  const sampleSeg = (seg: number[], pos: number): number => {
-    const i0 = Math.floor(pos);
-    const i1 = Math.min(seg.length - 1, i0 + 1);
-    const fr = pos - i0;
-    return seg[i0] * (1 - fr) + seg[i1] * fr;
-  };
-
-  // Exponent < 1 slows traversal near |x| = 1, i.e. stretches time at the crossings
-  const p = 1 / (1 + 3 * stretch);
-  const warped: number[] = [];
-
-  for (const seg of segs) {
-    const L = seg.length;
-    for (let j = 0; j < L; j++) {
-      const t = j / (L - 1);
-      const x = 2 * t - 1;
-      const w = 0.5 * (1 + Math.sign(x) * Math.pow(Math.abs(x), p));
-      warped.push(sampleSeg(seg, w * (L - 1)));
-    }
-    if (insert > 0.001) {
-      const insLen = Math.max(2, Math.round(L * insert));
-      for (let j = 0; j < insLen; j++) {
-        const t = j / (insLen - 1);
-        warped.push(-insert * sampleSeg(seg, (1 - t) * (L - 1)));
-      }
-    }
-  }
-
-  // Resample back to K, then rotate so the cycle keeps its original alignment
-  const M = warped.length;
-  const resampled = new Array<number>(K);
-  for (let j = 0; j < K; j++) {
-    const pos = (j / K) * M;
-    const i0 = Math.floor(pos) % M;
-    const i1 = (i0 + 1) % M;
-    const fr = pos - Math.floor(pos);
-    resampled[j] = warped[i0] * (1 - fr) + warped[i1] * fr;
-  }
-
-  const offset = crossings[0];
-  const out = new Array<number>(K);
-  for (let j = 0; j < K; j++) {
-    out[(j + offset) % K] = resampled[j];
-  }
-  return out;
-}
-
 export interface FourierResult {
   real: Float32Array;
   imag: Float32Array;
@@ -599,6 +507,8 @@ export interface FourierResult {
    * reconstructs the un-operated spectrum exactly. */
   residReal: Float32Array;
   residImag: Float32Array;
+  /** A/B composition and projection diagnostics, computed only for the lab or audition. */
+  lab?: OperatorLabAnalysis;
 }
 
 // Minimal complex-scalar arithmetic for the Möbius matrix power below. Cx = [re, im].
@@ -845,7 +755,8 @@ export function computeFourierSeries(
   p: SynthParams,
   harmonicsCount: number = p.harmonicsCount,
   flow: FlowState = STATIC_FLOW,
-  refFreq: number = FOCUS_REF_HZ
+  refFreq: number = FOCUS_REF_HZ,
+  includeOperatorLab = false
 ): FourierResult {
   const K = 512;
   let samples = new Array<number>(K);
@@ -899,88 +810,31 @@ export function computeFourierSeries(
     }
   }
 
-  // State-conditional regime split. It reads the cycle *after* the arithmetic blend, so the
-  // window is measured against whatever the oscillator section actually produced, and it runs
-  // before the projection so its discontinuities land on the harmonic grid rather than
-  // aliasing. Rule B comes from one of the cycles already on hand: either single-bend layer
-  // (the same A/B decomposition the tensor crossing reads), the arithmetic curve, or the
-  // fused cycle itself — which makes the split self-referential, the closest analogue of a
-  // time-domain regime oscillator swapping between two phases of one rule.
-  if (regimeOn) {
-    const ruleB =
-      regimeSource === 1
-        ? samplesB
-        : regimeSource === 2 && arith
-          ? arith
-          : regimeSource === 3
-            ? samples
-            : samplesA;
-    samples = applyRegimeSplit(samples, ruleB, {
-      threshold: p.regimeThreshold,
-      asym: p.regimeAsym,
-      rail: p.regimeRail,
-      offsetUp: p.regimeOffsetUp,
-      offsetDn: p.regimeOffsetDn,
-      knee: p.regimeKnee,
-      mix: p.regimeMix,
-    });
-  }
+  // The pre-projection patch is now a typed operator program. The same nodes are also
+  // available to the Operator Laboratory, which can run A∘B, B∘A, and Π commutators
+  // without duplicating the implementations used by the audible path.
+  const cycleContext: CycleOperatorContext = {
+    samplesA,
+    samplesB,
+    arithmetic: arith,
+    harmonicsCount,
+    lctMix: flow.frftMix,
+  };
+  const labEnabled = (p.labEnabled ?? 0) > 0.5;
+  const lab =
+    includeOperatorLab || labEnabled ? analyzeOperatorLab(samples, cycleContext, p) : undefined;
+  samples = labEnabled && lab
+    ? lab.results[lab.selected].cycle
+    : runPreProjectionProgram(samples, cycleContext, p);
 
-  // Time-domain zero-crossing pivot, applied before projection onto harmonics
-  samples = applyZeroPivotTransform(samples, p.zeroStretch, p.zeroInsert);
-
-  // Linear canonical transform of the cycle's time-frequency plane: FrFT rotation
-  // (frftAngle) composed with the metaplectic squeeze (frftSqueeze) and shear
-  // (frftShear). The path is bandlimited to the patch's own harmonic count, which
-  // also tames how fast the transform evolves with α (sensitivity grows with
-  // phase-space radius). frftMix is the dry/wet of the whole stage.
-  // The α-envelope flows the LCT dry/wet in over the note: flow.frftMix overrides the
-  // static p.frftMix per genesis stage (undefined → the static value).
-  const frftMix = flow.frftMix ?? p.frftMix;
-  const rotates = p.frftAngle > 0.002 && p.frftAngle < 3.998;
-  const deforms = Math.abs(p.frftSqueeze) > 0.001 || Math.abs(p.frftShear) > 0.001;
-  if (frftMix > 0.001 && (rotates || deforms)) {
-    const transformed = lctCycle(samples, p.frftAngle, p.frftSqueeze, p.frftShear, harmonicsCount);
-    for (let j = 0; j < K; j++) {
-      samples[j] = (1 - frftMix) * samples[j] + frftMix * transformed[j];
-    }
-  }
-
-  const real = new Float32Array(harmonicsCount + 1);
-  const imag = new Float32Array(harmonicsCount + 1);
-  const realA = new Float32Array(harmonicsCount + 1);
-  const imagA = new Float32Array(harmonicsCount + 1);
-  const realB = new Float32Array(harmonicsCount + 1);
-  const imagB = new Float32Array(harmonicsCount + 1);
-
-  for (let n = 1; n <= harmonicsCount; n++) {
-    let sumCos = 0;
-    let sumSin = 0;
-    let sumCosA = 0;
-    let sumSinA = 0;
-    let sumCosB = 0;
-    let sumSinB = 0;
-    for (let j = 0; j < K; j++) {
-      const theta = (j / K) * 2 * Math.PI;
-      const cosVal = Math.cos(n * theta);
-      const sinVal = Math.sin(n * theta);
-
-      sumCos += samples[j] * cosVal;
-      sumSin += samples[j] * sinVal;
-
-      sumCosA += samplesA[j] * cosVal;
-      sumSinA += samplesA[j] * sinVal;
-
-      sumCosB += samplesB[j] * cosVal;
-      sumSinB += samplesB[j] * sinVal;
-    }
-    real[n] = (2 / K) * sumCos;
-    imag[n] = (2 / K) * sumSin;
-    realA[n] = (2 / K) * sumCosA;
-    imagA[n] = (2 / K) * sumSinA;
-    realB[n] = (2 / K) * sumCosB;
-    imagB[n] = (2 / K) * sumSinB;
-  }
+  // Π is a named first-class boundary rather than an inline DFT loop. The three source
+  // representations share exactly the same projection semantics.
+  const projected = projectCycle(samples, { harmonics: harmonicsCount });
+  const projectedA = projectCycle(samplesA, { harmonics: harmonicsCount });
+  const projectedB = projectCycle(samplesB, { harmonics: harmonicsCount });
+  const { real, imag } = projected;
+  const { real: realA, imag: imagA } = projectedA;
+  const { real: realB, imag: imagB } = projectedB;
 
   // Generalized slice of the tensor outer product T_{r,s} = F_A(r)·F_B(s).
   //
@@ -1688,6 +1542,7 @@ export function computeFourierSeries(
     samplesCross,
     residReal,
     residImag,
+    lab,
   };
 }
 
@@ -2000,6 +1855,10 @@ export const WAVE_KEYS: (keyof SynthParams)[] = [
   'regimeOffsetDn',
   'regimeKnee',
   'regimeSource',
+  'labEnabled',
+  'labOperatorA',
+  'labOperatorB',
+  'labResult',
   'zeroStretch',
   'zeroInsert',
   'frftAngle',
