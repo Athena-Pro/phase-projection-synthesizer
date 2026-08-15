@@ -111,6 +111,7 @@ const VIEW_LABEL: Record<DisplayMode, string> = {
   tensor: 'Tensor · A⊗B',
   cp1: 'Projective · CP¹',
   orbit: 'Genesis Flow',
+  lab: 'Operator Laboratory',
 };
 
 export default function SynthControls({
@@ -1048,6 +1049,14 @@ export default function SynthControls({
       <>
         {pivotMotionSection}
         {extensionSection}
+      </>
+    ),
+    lab: (
+      <>
+        {regimeSection}
+        {pivotMotionSection}
+        {canonicalSection}
+        {filterSection}
       </>
     ),
   };

@@ -1,8 +1,10 @@
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { SynthParams, Vector3D } from '../types';
 import { computeFourierSeries, waveStamp, STATIC_FLOW } from '../lib/audioEngine';
+import { CYCLE_OPERATOR_IDS, CYCLE_OPERATORS } from '../lib/cycleOperators';
+import { LAB_RESULT_IDS, LAB_RESULT_LABELS } from '../lib/operatorLab';
 
-export type DisplayMode = 'scope' | 'spect' | 'tensor' | 'cp1' | 'orbit';
+export type DisplayMode = 'scope' | 'spect' | 'tensor' | 'cp1' | 'orbit' | 'lab';
 
 interface DisplayProps {
   params: SynthParams;
@@ -10,6 +12,7 @@ interface DisplayProps {
   isPlaying: boolean;
   referenceNote: number;
   bypassed: boolean;
+  onChange: (next: SynthParams) => void;
 }
 
 const PHOS = '#58ff8d';
@@ -38,12 +41,19 @@ const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A'
 const noteLabel = (note: number) => `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 1}`;
 const noteFrequency = (note: number) => 440 * Math.pow(2, (note - 69) / 12);
 
-export default function Display({ params, mode, isPlaying, referenceNote, bypassed }: DisplayProps) {
+export default function Display({ params, mode, isPlaying, referenceNote, bypassed, onChange }: DisplayProps) {
   const fourier = useMemo(
-    () => computeFourierSeries(params, params.harmonicsCount, STATIC_FLOW, noteFrequency(referenceNote)),
+    () =>
+      computeFourierSeries(
+        params,
+        params.harmonicsCount,
+        STATIC_FLOW,
+        noteFrequency(referenceNote),
+        mode === 'lab'
+      ),
     // waveStamp covers every spectral param; referenceNote matters in Hz band mode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [waveStamp(params), referenceNote]
+    [waveStamp(params), referenceNote, mode]
   );
   const referenceFrequency = noteFrequency(referenceNote);
 
@@ -88,19 +98,137 @@ export default function Display({ params, mode, isPlaying, referenceNote, bypass
         {mode === 'tensor' && <Tensor fourier={fourier} params={params} />}
         {mode === 'cp1' && <CP1 fourier={fourier} />}
         {mode === 'orbit' && <Orbit fourier={fourier} params={params} isPlaying={isPlaying} />}
+        {mode === 'lab' && <OperatorLab fourier={fourier} params={params} onChange={onChange} />}
       </div>
       <div className="bg-vfd border-t border-phos-dim/50 px-2.5 py-1 flex justify-between text-[8px] tracking-wider vfd-text opacity-90">
         <span>
           N={params.harmonicsCount} · REF {noteLabel(referenceNote)} {referenceFrequency.toFixed(1)}HZ ·{' '}
           {bypassed ? 'B BYPASS' : 'A PROCESSED'}
         </span>
-        <span>RANK-1 ε={segre.toFixed(8)}</span>
+        <span>
+          {mode === 'lab' && fourier.lab
+            ? `[A,B] RMS=${fourier.lab.metrics.commutatorRms.toExponential(2)} · [Π,A]=${fourier.lab.metrics.projectionCommutatorRms.toExponential(2)}`
+            : `RANK-1 ε=${segre.toFixed(8)}`}
+        </span>
       </div>
     </div>
   );
 }
 
 type FR = ReturnType<typeof computeFourierSeries>;
+
+function normalizeForTrace(samples: number[]): number[] {
+  let peak = 0;
+  for (const sample of samples) peak = Math.max(peak, Math.abs(fin(sample)));
+  const scale = peak > 1e-9 ? 0.86 / peak : 1;
+  return samples.map((sample) => fin(sample) * scale);
+}
+
+function OperatorLab({
+  fourier,
+  params,
+  onChange,
+}: {
+  fourier: FR;
+  params: SynthParams;
+  onChange: (next: SynthParams) => void;
+}) {
+  const lab = fourier.lab;
+  if (!lab) return null;
+  const selected = lab.results[lab.selected];
+  const selectedTrace = normalizeForTrace(selected.cycle);
+  const abTrace = normalizeForTrace(lab.results.ab.cycle);
+  const baTrace = normalizeForTrace(lab.results.ba.cycle);
+  const update = (patch: Partial<SynthParams>) => onChange({ ...params, ...patch });
+  const metrics = lab.metrics;
+
+  return (
+    <div className="h-full flex flex-col px-2 py-1.5 gap-1.5">
+      <div className="flex items-center gap-1.5 text-[7px] uppercase tracking-wider">
+        <label className="text-dim">A</label>
+        <select
+          className="bg-black/50 border border-phos-dim/70 text-phos rounded-[2px] px-1 py-0.5 outline-none"
+          value={Math.round(params.labOperatorA ?? 0)}
+          onChange={(event) => update({ labOperatorA: Number(event.target.value) })}
+          aria-label="Operator A"
+        >
+          {CYCLE_OPERATOR_IDS.map((id, index) => (
+            <option key={id} value={index}>{CYCLE_OPERATORS[id].label}</option>
+          ))}
+        </select>
+        <label className="text-dim">B</label>
+        <select
+          className="bg-black/50 border border-phos-dim/70 text-phos rounded-[2px] px-1 py-0.5 outline-none"
+          value={Math.round(params.labOperatorB ?? 2)}
+          onChange={(event) => update({ labOperatorB: Number(event.target.value) })}
+          aria-label="Operator B"
+        >
+          {CYCLE_OPERATOR_IDS.map((id, index) => (
+            <option key={id} value={index}>{CYCLE_OPERATORS[id].label}</option>
+          ))}
+        </select>
+        <select
+          className="bg-black/50 border border-phos-dim/70 text-phos rounded-[2px] px-1 py-0.5 outline-none"
+          value={Math.round(params.labResult ?? 4)}
+          onChange={(event) => update({ labResult: Number(event.target.value) })}
+          aria-label="Laboratory result"
+        >
+          {LAB_RESULT_IDS.map((id, index) => (
+            <option key={id} value={index}>{LAB_RESULT_LABELS[id]}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={`ml-auto border rounded-[2px] px-1.5 py-0.5 cursor-pointer ${
+            (params.labEnabled ?? 0) > 0.5
+              ? 'border-amber/70 text-amber bg-amber/10'
+              : 'border-phos-dim/70 text-phos'
+          }`}
+          onClick={() => update({ labEnabled: (params.labEnabled ?? 0) > 0.5 ? 0 : 1 })}
+          title="Route the selected laboratory result into the additive renderer"
+        >
+          {(params.labEnabled ?? 0) > 0.5 ? 'Auditioning' : 'Audition'}
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,1fr)_126px] gap-2">
+        <svg className="w-full h-full" viewBox="0 0 420 174" preserveAspectRatio="none" role="img" aria-label={`${selected.label} operator comparison`}>
+          <line x1="0" y1="87" x2="420" y2="87" stroke={PHOS_DIM} strokeWidth="1" />
+          <path d={tracePath(abTrace, 420, 174)} fill="none" stroke={AMBER} strokeWidth="0.8" strokeDasharray="3 4" opacity="0.55" />
+          <path d={tracePath(baTrace, 420, 174)} fill="none" stroke={PHOS_MID} strokeWidth="0.8" strokeDasharray="2 3" opacity="0.55" />
+          <path
+            d={tracePath(selectedTrace, 420, 174)}
+            fill="none"
+            stroke={PHOS}
+            strokeWidth="1.6"
+            style={{ filter: 'drop-shadow(0 0 3px rgba(88,255,141,0.6))' }}
+          />
+          <text x="7" y="13" fill={PHOS} fontSize="8" fontFamily="inherit">{selected.label}</text>
+          <text x="344" y="13" fill={AMBER} fontSize="6.5" fontFamily="inherit">AB ---</text>
+          <text x="344" y="24" fill={PHOS} opacity="0.7" fontSize="6.5" fontFamily="inherit">BA ···</text>
+        </svg>
+        <div className="border-l border-phos-dim/50 pl-2 grid grid-cols-1 content-center gap-1 text-[7px] tracking-wide uppercase">
+          <Metric label="Diff energy" value={metrics.differenceEnergy} />
+          <Metric label="Spectral dist" value={metrics.spectralCosineDistance} />
+          <Metric label="Magnitude" value={metrics.magnitudeDistance} />
+          <Metric label="Phase" value={metrics.phaseDistance} />
+          <Metric label="Entropy" value={metrics.entropy} />
+          <Metric label="Centroid" value={metrics.spectralCentroid} digits={2} />
+          <Metric label="Projection loss" value={metrics.projectionLoss} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, digits = 4 }: { label: string; value: number; digits?: number }) {
+  return (
+    <div className="flex justify-between gap-1">
+      <span className="text-dim">{label}</span>
+      <span className="text-phos">{Number.isFinite(value) ? value.toFixed(digits) : '—'}</span>
+    </div>
+  );
+}
 
 function Scope({ fourier, params }: { fourier: FR; params: SynthParams }) {
   const W = 420;

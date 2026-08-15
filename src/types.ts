@@ -108,6 +108,14 @@ export interface SynthParams {
   regimeOffsetDn: number;  // 0.0 to 1.0: phase offset (in cycles) of the branch taken below the window
   regimeKnee: number;      // 0.0 to 1.0: crossover width — 0 is a hard switch, opening it smoothsteps the rules together
   regimeSource: number;    // which cycle supplies the out-of-window rule: 0 = bend A, 1 = bend B, 2 = arithmetic curve, 3 = the fused cycle itself
+  // ── Operator Laboratory ─────────────────────────────────────────────────────────────
+  // Optional so older user slots and factory patches deserialize as lab-off. A/B select
+  // the extracted pre-projection operators (0 regime, 1 zero pivot, 2 LCT); result selects
+  // A, B, AB, BA, [A,B], ΠA, AΠ, or [Π,A].
+  labEnabled?: number;
+  labOperatorA?: number;
+  labOperatorB?: number;
+  labResult?: number;
   zeroStretch: number;  // 0.0 to 1.0: time dilation pivoting at zero crossings
   zeroInsert: number;   // 0.0 to 1.0: reflected lobes inserted at zero crossings
   frftAngle: number;    // 0 to 4 (units of π/2): fractional Fourier rotation of the cycle's time-frequency plane
